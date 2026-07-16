@@ -712,36 +712,28 @@ body {
 
 /* ---------- Rival AI reasoning panel ---------- */
 .battle-layout {
-  display: flex;
-  gap: 1rem;
-  align-items: flex-start;
-}
-
-.battle-main {
-  flex: 1;
-  min-width: 0;
-}
-
-.ai-panel {
-  flex-shrink: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0.6rem;
   position: relative;
 }
 
-@media (min-width: 960px) {
-  /* Slide the panel (and the "?" toggle / reasoning box) left into the empty
-     gutter beside the centered 900px container, scaling with the gutter width so
-     it lands ~1rem from the viewport's left edge. `left` (not margin) keeps the
-     battle column in place. */
-  .ai-panel {
-    left: calc((900px - 100vw) / 2 + 1rem);
-  }
+.battle-main {
+  min-width: 0;
+}
+
+/* The panel is an out-of-flow overlay so the simulator stays centered and never
+   shifts when the "?" toggle opens the reasoning box. On wide screens the negative
+   `left` keeps it out in the left gutter; the min() cap pins it near the left edge
+   when the gutter is small. */
+.ai-panel {
+  position: absolute;
+  top: 0;
+  left: min(0.5rem, calc((900px - 100vw) / 2 + 0.25rem));
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
 }
 
 .ai-panel--open {
-  width: 240px;
+  width: 184px;
 }
 
 .why-toggle {
@@ -764,10 +756,11 @@ body {
 }
 
 .why-box {
-  background: rgba(10, 15, 36, 0.7);
+  background: rgba(8, 11, 28, 0.96);
   border: 1px solid rgba(255, 78, 205, 0.35);
   border-radius: 12px;
   padding: 0.85rem 0.95rem;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.5);
 }
 
 .why-title {
@@ -800,8 +793,11 @@ body {
 }
 
 @media (max-width: 720px) {
-  .battle-layout {
-    flex-direction: column;
+  /* Small screens have no gutter — put the panel back in flow, stacked above the
+     battle (pushes down, never right) with no overlap. */
+  .ai-panel {
+    position: static;
+    margin-bottom: 1rem;
   }
   .ai-panel--open {
     width: 100%;
