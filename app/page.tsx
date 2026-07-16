@@ -3,6 +3,7 @@ import Link from "next/link";
 const pages = [
   { href: "/team-builder", label: "Team Builder" },
   { href: "/battle", label: "Battle" },
+  { href: "/auto-mode", label: "Auto Battle" },
   { href: "/my-page", label: "My Page" },
 ];
 

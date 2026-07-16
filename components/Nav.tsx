@@ -5,7 +5,7 @@ const links = [
   { href: "/team-builder", label: "Team Builder" },
   { href: "/battle", label: "Battle" },
   { href: "/my-page", label: "My Page" },
-  { href: "/auto-mode", label: "Auto Mode" },
+  { href: "/auto-mode", label: "Auto Battle" },
 ];
 
 export default function Nav() {
