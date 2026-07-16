@@ -3,8 +3,8 @@ import Nav from "@/components/Nav";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Aether Companion — VGC",
-  description: "A companion site to help players improve at VGC.",
+  title: "AetherESports",
+  description: "AetherESports — improve your VGC game.",
 };
 
 export default function RootLayout({
