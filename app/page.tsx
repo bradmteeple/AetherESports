@@ -1,7 +1,6 @@
 import Link from "next/link";
 
 const pages = [
-  { href: "/social", label: "Social" },
   { href: "/team-builder", label: "Team Builder" },
   { href: "/battle", label: "Battle" },
   { href: "/my-page", label: "My Page" },
