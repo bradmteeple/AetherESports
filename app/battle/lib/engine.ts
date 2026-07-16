@@ -5,8 +5,9 @@
 // with team preview (VGC 2025 Reg I). Mechanics are identical to the games.
 
 import "./node-shim"; // must precede any @pkmn import — defines Node globals for the browser
-import { BattleStreams, Teams, RandomPlayerAI, Dex, toID } from "@pkmn/sim";
+import { BattleStreams, Teams, Dex, toID } from "@pkmn/sim";
 import { TeamGenerators } from "@pkmn/randoms";
+import { ReasoningAI } from "./ai";
 import { describeLine, emptyBoard, type BoardState, type StatBlock } from "./protocol";
 import { FORMATS, type FormatDef, type FormatKey } from "./formats";
 
@@ -55,6 +56,7 @@ export interface BattleSnapshot {
   gametype: "singles" | "doubles";
   requestId: number; // increments each new actionable request (UI reset key)
   teamStats: Record<string, StatBlock>; // player's team, keyed by species id
+  aiReasons: string[]; // Rival AI's reasoning for the most recently completed turn
   log: string[];
   board: BoardState;
   prompt: Prompt;
@@ -104,6 +106,8 @@ export class BattleController {
   private def: FormatDef;
   private itemMap: { p1: Record<string, string>; p2: Record<string, string> } = { p1: {}, p2: {} };
   private abilityMap: { p1: Record<string, string>; p2: Record<string, string> } = { p1: {}, p2: {} };
+  private reasonsByTurn: Record<number, string[]> = {};
+  private maxTurn = 0;
 
   constructor(format: FormatKey, onUpdate: (s: BattleSnapshot) => void) {
     this.def = FORMATS[format];
@@ -113,6 +117,7 @@ export class BattleController {
       gametype: this.def.gametype,
       requestId: 0,
       teamStats: {},
+      aiReasons: [],
       log: [],
       board: emptyBoard(),
       prompt: "none",
@@ -142,6 +147,10 @@ export class BattleController {
     for (const mon of this.snapshot.board.p1) {
       if (mon) mon.stats = this.snapshot.teamStats[toID(mon.name)];
     }
+    // Expose only the most-recently-COMPLETED turn's reasoning, so the human never sees
+    // the Rival AI's upcoming move before locking in their own.
+    const completedTurn = this.snapshot.ended ? this.maxTurn : this.maxTurn - 1;
+    this.snapshot.aiReasons = this.reasonsByTurn[completedTurn] ?? [];
     this.onUpdate({ ...this.snapshot, log: [...this.snapshot.log] });
   }
 
@@ -188,7 +197,12 @@ export class BattleController {
     const { p1, p2, p1Sets, p2Sets } = this.teamsFor();
     this.buildTeamMaps(p1Sets, p2Sets);
 
-    const ai = new RandomPlayerAI(this.streams.p2);
+    const ai = new ReasoningAI(this.streams.p2, (turn, reasons) => {
+      // Accumulate a turn's reasons (moves + any mid-turn forced switch), de-duplicated.
+      const merged = [...(this.reasonsByTurn[turn] ?? []), ...reasons];
+      this.reasonsByTurn[turn] = Array.from(new Set(merged));
+      this.emit();
+    });
     void ai.start();
     void this.readPlayerStream();
 
@@ -208,7 +222,11 @@ export class BattleController {
       for await (const chunk of this.streams.p1) {
         if (this.destroyed) return;
         for (const line of chunk.split("\n")) {
-          if (line.startsWith("|request|")) {
+          if (line.startsWith("|turn|")) {
+            this.maxTurn = parseInt(line.slice("|turn|".length), 10) || this.maxTurn;
+            const text = describeLine(line, this.snapshot.board);
+            if (text) this.pushLog(text);
+          } else if (line.startsWith("|request|")) {
             this.handleRequest(line.slice("|request|".length));
           } else if (line.startsWith("|error|")) {
             this.pushLog(`⚠️ ${line.slice("|error|".length)}`);

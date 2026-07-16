@@ -709,3 +709,90 @@ body {
   font-weight: 700;
   color: #f5f7ff;
 }
+
+/* ---------- Rival AI reasoning panel ---------- */
+.battle-layout {
+  display: flex;
+  gap: 1rem;
+  align-items: flex-start;
+}
+
+.battle-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.ai-panel {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.ai-panel--open {
+  width: 240px;
+}
+
+.why-toggle {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 1px solid rgba(0, 224, 255, 0.6);
+  background: rgba(0, 224, 255, 0.15);
+  color: #f5f7ff;
+  font-size: 1.3rem;
+  font-weight: 800;
+  cursor: pointer;
+  align-self: flex-start;
+  transition: background 0.15s ease, box-shadow 0.15s ease;
+}
+
+.why-toggle:hover {
+  background: rgba(0, 224, 255, 0.3);
+  box-shadow: 0 0 18px rgba(0, 224, 255, 0.35);
+}
+
+.why-box {
+  background: rgba(10, 15, 36, 0.7);
+  border: 1px solid rgba(255, 78, 205, 0.35);
+  border-radius: 12px;
+  padding: 0.85rem 0.95rem;
+}
+
+.why-title {
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #ff8fdc;
+  margin-bottom: 0.5rem;
+}
+
+.why-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.why-list li {
+  font-size: 0.82rem;
+  line-height: 1.4;
+  color: #eef1ff;
+  padding-left: 0.7rem;
+  border-left: 2px solid rgba(255, 78, 205, 0.5);
+}
+
+.why-empty {
+  font-size: 0.82rem;
+  color: #9fb6d6;
+}
+
+@media (max-width: 720px) {
+  .battle-layout {
+    flex-direction: column;
+  }
+  .ai-panel--open {
+    width: 100%;
+  }
+}

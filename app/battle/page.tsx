@@ -11,6 +11,7 @@ export default function BattlePage() {
   const [runningFormat, setRunningFormat] = useState<FormatKey>("gen9randombattle");
   const [snapshot, setSnapshot] = useState<BattleSnapshot | null>(null);
   const [battleKey, setBattleKey] = useState(0);
+  const [whyOpen, setWhyOpen] = useState(false);
   const logEndRef = useRef<HTMLDivElement | null>(null);
   const chooseRef = useRef<((choice: string) => void) | null>(null);
 
@@ -73,30 +74,74 @@ export default function BattlePage() {
       {!snapshot ? (
         <div className="battle-loading">Generating teams and starting the battle…</div>
       ) : (
-        <div className="battle-grid">
-          <FieldSide board={snapshot.board} side="p2" label="Rival AI" doubles={snapshot.gametype === "doubles"} foe />
-          <FieldSide board={snapshot.board} side="p1" label="You" doubles={snapshot.gametype === "doubles"} />
+        <div className="battle-layout">
+          <AiWhyPanel open={whyOpen} onToggle={() => setWhyOpen((o) => !o)} reasons={snapshot.aiReasons} />
 
-          <div className="battle-log" aria-live="polite">
-            {snapshot.log.map((line, i) => (
-              <div
-                key={i}
-                className={
-                  "battle-log-line" +
-                  (line.startsWith("\n") ? " battle-log-line--turn" : "") +
-                  (line.startsWith("⚠️") ? " battle-log-line--warn" : "")
-                }
-              >
-                {line.trim()}
+          <div className="battle-main">
+            <div className="battle-grid">
+              <FieldSide board={snapshot.board} side="p2" label="Rival AI" doubles={snapshot.gametype === "doubles"} foe />
+              <FieldSide board={snapshot.board} side="p1" label="You" doubles={snapshot.gametype === "doubles"} />
+
+              <div className="battle-log" aria-live="polite">
+                {snapshot.log.map((line, i) => (
+                  <div
+                    key={i}
+                    className={
+                      "battle-log-line" +
+                      (line.startsWith("\n") ? " battle-log-line--turn" : "") +
+                      (line.startsWith("⚠️") ? " battle-log-line--warn" : "")
+                    }
+                  >
+                    {line.trim()}
+                  </div>
+                ))}
+                <div ref={logEndRef} />
               </div>
-            ))}
-            <div ref={logEndRef} />
-          </div>
 
-          <ChoiceArea snapshot={snapshot} choose={choose} onNewBattle={newBattle} />
+              <ChoiceArea snapshot={snapshot} choose={choose} onNewBattle={newBattle} />
+            </div>
+          </div>
         </div>
       )}
     </>
+  );
+}
+
+function AiWhyPanel({
+  open,
+  onToggle,
+  reasons,
+}: {
+  open: boolean;
+  onToggle: () => void;
+  reasons: string[];
+}) {
+  return (
+    <aside className={"ai-panel" + (open ? " ai-panel--open" : "")}>
+      <button
+        className="why-toggle"
+        onClick={onToggle}
+        aria-expanded={open}
+        aria-label="Why did the Rival AI make that move?"
+        title="Why did the Rival AI make that move?"
+      >
+        ?
+      </button>
+      {open && (
+        <div className="why-box" role="region" aria-label="Rival AI reasoning">
+          <div className="why-title">Rival AI — why?</div>
+          {reasons.length ? (
+            <ul className="why-list">
+              {reasons.map((r, i) => (
+                <li key={i}>{r}</li>
+              ))}
+            </ul>
+          ) : (
+            <p className="why-empty">The Rival AI hasn&apos;t moved yet.</p>
+          )}
+        </div>
+      )}
+    </aside>
   );
 }
 
