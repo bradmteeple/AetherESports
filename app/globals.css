@@ -395,6 +395,13 @@ body {
   box-shadow: 0 0 18px rgba(0, 224, 255, 0.25);
 }
 
+.format-note {
+  margin: -0.5rem 0 1rem;
+  font-size: 0.8rem;
+  color: #9fb6d6;
+  max-width: 640px;
+}
+
 /* ---------- Field (singles + doubles) ---------- */
 .field-side {
   display: grid;

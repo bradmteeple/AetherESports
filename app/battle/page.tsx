@@ -3,12 +3,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { BattleSnapshot, MoveOption, SwitchOption } from "./lib/engine";
 import type { ActiveMon, BoardState } from "./lib/protocol";
-import { FORMAT_LIST, type FormatId } from "./lib/formats";
+import { FORMAT_LIST, FORMATS, type FormatKey } from "./lib/formats";
 import { needsTarget, targetOptions } from "./lib/choices";
 
 export default function BattlePage() {
-  const [selectedFormat, setSelectedFormat] = useState<FormatId>("gen9randombattle");
-  const [runningFormat, setRunningFormat] = useState<FormatId>("gen9randombattle");
+  const [selectedFormat, setSelectedFormat] = useState<FormatKey>("gen9randombattle");
+  const [runningFormat, setRunningFormat] = useState<FormatKey>("gen9randombattle");
   const [snapshot, setSnapshot] = useState<BattleSnapshot | null>(null);
   const [battleKey, setBattleKey] = useState(0);
   const logEndRef = useRef<HTMLDivElement | null>(null);
@@ -54,9 +54,9 @@ export default function BattlePage() {
       <div className="format-picker">
         {FORMAT_LIST.map((f) => (
           <button
-            key={f.id}
-            className={"format-btn" + (selectedFormat === f.id ? " format-btn--on" : "")}
-            onClick={() => setSelectedFormat(f.id)}
+            key={f.key}
+            className={"format-btn" + (selectedFormat === f.key ? " format-btn--on" : "")}
+            onClick={() => setSelectedFormat(f.key)}
           >
             {f.label}
           </button>
@@ -65,6 +65,10 @@ export default function BattlePage() {
           ↻ New Battle
         </button>
       </div>
+
+      {FORMATS[selectedFormat].note && (
+        <p className="format-note">* {FORMATS[selectedFormat].note}</p>
+      )}
 
       {!snapshot ? (
         <div className="battle-loading">Generating teams and starting the battle…</div>

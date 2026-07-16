@@ -8,7 +8,7 @@ import "./node-shim"; // must precede any @pkmn import — defines Node globals 
 import { BattleStreams, Teams, RandomPlayerAI, Dex, toID } from "@pkmn/sim";
 import { TeamGenerators } from "@pkmn/randoms";
 import { describeLine, emptyBoard, type BoardState } from "./protocol";
-import { FORMATS, type FormatDef, type FormatId } from "./formats";
+import { FORMATS, type FormatDef, type FormatKey } from "./formats";
 
 Teams.setGeneratorFactory(TeamGenerators);
 
@@ -47,7 +47,7 @@ export interface PreviewMon {
 export type Prompt = "move" | "switch" | "teampreview" | "wait" | "none";
 
 export interface BattleSnapshot {
-  format: FormatId;
+  format: FormatKey;
   gametype: "singles" | "doubles";
   requestId: number; // increments each new actionable request (UI reset key)
   log: string[];
@@ -76,7 +76,7 @@ export class BattleController {
   private def: FormatDef;
   private itemMap: { p1: Record<string, string>; p2: Record<string, string> } = { p1: {}, p2: {} };
 
-  constructor(format: FormatId, onUpdate: (s: BattleSnapshot) => void) {
+  constructor(format: FormatKey, onUpdate: (s: BattleSnapshot) => void) {
     this.def = FORMATS[format];
     this.onUpdate = onUpdate;
     this.snapshot = {
@@ -122,8 +122,8 @@ export class BattleController {
       const p2Sets = Teams.unpack(pool[j]) ?? [];
       return { p1: pool[i], p2: pool[j], p1Sets, p2Sets };
     }
-    const p1Sets = Teams.generate(this.def.id);
-    const p2Sets = Teams.generate(this.def.id);
+    const p1Sets = Teams.generate(this.def.engineFormat);
+    const p2Sets = Teams.generate(this.def.engineFormat);
     return { p1: Teams.pack(p1Sets), p2: Teams.pack(p2Sets), p1Sets, p2Sets };
   }
 
@@ -151,7 +151,7 @@ export class BattleController {
     void ai.start();
     void this.readPlayerStream();
 
-    const spec = { formatid: this.def.id };
+    const spec = { formatid: this.def.engineFormat };
     const p1spec = { name: "You", team: p1 };
     const p2spec = { name: "Rival AI", team: p2 };
 
