@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { BattleSnapshot, MoveOption, SwitchOption } from "./lib/engine";
-import type { ActiveMon, BoardState } from "./lib/protocol";
+import type { ActiveMon, BoardState, StatBlock } from "./lib/protocol";
 import { FORMAT_LIST, FORMATS, type FormatKey } from "./lib/formats";
 import { needsTarget, targetOptions } from "./lib/choices";
 
@@ -123,15 +123,47 @@ function FieldSide({
   );
 }
 
+function StatPop({ stats }: { stats?: StatBlock }) {
+  if (!stats) return null;
+  const cells: [string, number][] = [
+    ["HP", stats.hp],
+    ["Atk", stats.atk],
+    ["Def", stats.def],
+    ["SpA", stats.spa],
+    ["SpD", stats.spd],
+    ["Spe", stats.spe],
+  ];
+  return (
+    <span className="stat-tooltip" role="tooltip">
+      <span className="stat-head">
+        Lv {stats.level}
+        {stats.tera ? ` · Tera ${stats.tera}` : ""}
+      </span>
+      <span className="stat-grid">
+        {cells.map(([k, v]) => (
+          <span className="stat-cell" key={k}>
+            <span className="stat-k">{k}</span>
+            <span className="stat-v">{v}</span>
+          </span>
+        ))}
+      </span>
+    </span>
+  );
+}
+
 function MonCard({ mon, sideLabel, foe }: { mon: ActiveMon | null; sideLabel: string; foe?: boolean }) {
   return (
-    <div className={"mon-card" + (foe ? " mon-card--foe" : "")}>
+    <div
+      className={"mon-card" + (foe ? " mon-card--foe" : "") + (mon?.stats ? " has-pop" : "")}
+      tabIndex={mon?.stats ? 0 : undefined}
+    >
       <div className="mon-card-head">
         <span className="mon-side">{sideLabel}</span>
         <span className="mon-name">{mon ? mon.name : "—"}</span>
         {mon?.status && <span className="mon-status">{mon.status.toUpperCase()}</span>}
       </div>
       <div className="mon-item">{mon?.item ? `@ ${mon.item}` : " "}</div>
+      <StatPop stats={mon?.stats} />
       <div className="hp-bar">
         <div
           className={
@@ -208,12 +240,17 @@ function TeamPreviewPanel({ snapshot, choose }: { snapshot: BattleSnapshot; choo
           return (
             <button
               key={p.slot}
-              className={"preview-card" + (idx >= 0 ? " preview-card--picked" : "")}
+              className={
+                "preview-card" +
+                (idx >= 0 ? " preview-card--picked" : "") +
+                (p.stats ? " has-pop" : "")
+              }
               onClick={() => toggle(p.slot)}
             >
               {idx >= 0 && <span className="preview-order">{idx + 1}</span>}
               <span className="preview-name">{p.name}</span>
               <span className="preview-item">{p.item ? `@ ${p.item}` : "no item"}</span>
+              <StatPop stats={p.stats} />
             </button>
           );
         })}
@@ -411,11 +448,16 @@ function SwitchButtons({
   return (
     <div className="switch-grid">
       {switches.map((s) => (
-        <button key={s.slot} className="switch-btn" onClick={() => onSwitch(s.slot)}>
+        <button
+          key={s.slot}
+          className={"switch-btn" + (s.stats ? " has-pop" : "")}
+          onClick={() => onSwitch(s.slot)}
+        >
           <span className="switch-name">{s.name}</span>
           <span className="switch-hp">
             {s.hpPct}%{s.item ? ` · ${s.item}` : ""}
           </span>
+          <StatPop stats={s.stats} />
         </button>
       ))}
     </div>
