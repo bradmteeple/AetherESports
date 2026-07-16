@@ -19,6 +19,7 @@ export interface ActiveMon {
   status: string;
   fainted: boolean;
   item: string; // filled in by the engine from the known team lists
+  ability: string; // filled in by the engine from the known team lists
   stats?: StatBlock; // player's own field mons only
 }
 
@@ -58,7 +59,7 @@ export function describeLine(line: string, board: BoardState): string | null {
 
   const setActive = (identRaw: string, cond?: string) => {
     const { side, slot, name } = parseIdent(identRaw);
-    const base: ActiveMon = { name, hpPct: 100, status: "", fainted: false, item: "" };
+    const base: ActiveMon = { name, hpPct: 100, status: "", fainted: false, item: "", ability: "" };
     board[side][slot] = cond ? { ...base, ...parseCondition(cond) } : base;
     return { side, slot, name };
   };
@@ -66,7 +67,14 @@ export function describeLine(line: string, board: BoardState): string | null {
     const { side, slot, name } = parseIdent(identRaw);
     const c = parseCondition(cond);
     const prev = board[side][slot];
-    board[side][slot] = { name, item: prev?.item ?? "", hpPct: c.hpPct, status: c.status, fainted: c.fainted };
+    board[side][slot] = {
+      name,
+      item: prev?.item ?? "",
+      ability: prev?.ability ?? "",
+      hpPct: c.hpPct,
+      status: c.status,
+      fainted: c.fainted,
+    };
     return { side, slot, name, ...c };
   };
 

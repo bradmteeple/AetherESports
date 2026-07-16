@@ -162,6 +162,7 @@ function MonCard({ mon, sideLabel, foe }: { mon: ActiveMon | null; sideLabel: st
         <span className="mon-name">{mon ? mon.name : "—"}</span>
         {mon?.status && <span className="mon-status">{mon.status.toUpperCase()}</span>}
       </div>
+      {mon?.ability && <div className="mon-ability">{mon.ability}</div>}
       <div className="mon-item">{mon?.item ? `@ ${mon.item}` : " "}</div>
       <StatPop stats={mon?.stats} />
       <div className="hp-bar">
@@ -249,6 +250,7 @@ function TeamPreviewPanel({ snapshot, choose }: { snapshot: BattleSnapshot; choo
             >
               {idx >= 0 && <span className="preview-order">{idx + 1}</span>}
               <span className="preview-name">{p.name}</span>
+              {p.ability && <span className="preview-ability">{p.ability}</span>}
               <span className="preview-item">{p.item ? `@ ${p.item}` : "no item"}</span>
               <StatPop stats={p.stats} />
             </button>
@@ -454,6 +456,7 @@ function SwitchButtons({
           onClick={() => onSwitch(s.slot)}
         >
           <span className="switch-name">{s.name}</span>
+          {s.ability && <span className="switch-ability">{s.ability}</span>}
           <span className="switch-hp">
             {s.hpPct}%{s.item ? ` · ${s.item}` : ""}
           </span>

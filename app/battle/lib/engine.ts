@@ -34,6 +34,7 @@ export interface SwitchOption {
   hpPct: number;
   status: string;
   item: string;
+  ability: string;
   fainted: boolean;
   active: boolean;
   stats?: StatBlock;
@@ -43,6 +44,7 @@ export interface PreviewMon {
   slot: number; // 1-based
   name: string;
   item: string;
+  ability: string;
   stats?: StatBlock;
 }
 
@@ -71,6 +73,12 @@ const itemName = (raw: string | undefined): string => {
   return it.exists ? it.name : String(raw);
 };
 
+const abilityName = (raw: string | undefined): string => {
+  if (!raw) return "";
+  const a = Dex.abilities.get(raw);
+  return a.exists ? a.name : String(raw);
+};
+
 // Build a StatBlock from a request's side.pokemon entry (player's own team).
 function statBlockFrom(p: any): StatBlock | undefined {
   if (!p?.stats) return undefined;
@@ -95,6 +103,7 @@ export class BattleController {
   private onUpdate: (s: BattleSnapshot) => void;
   private def: FormatDef;
   private itemMap: { p1: Record<string, string>; p2: Record<string, string> } = { p1: {}, p2: {} };
+  private abilityMap: { p1: Record<string, string>; p2: Record<string, string> } = { p1: {}, p2: {} };
 
   constructor(format: FormatKey, onUpdate: (s: BattleSnapshot) => void) {
     this.def = FORMATS[format];
@@ -121,10 +130,12 @@ export class BattleController {
 
   private emit() {
     if (this.destroyed) return;
-    // Reveal held items on the field for BOTH sides from the known team lists.
+    // Reveal held items + abilities on the field for BOTH sides from the known team lists.
     for (const side of ["p1", "p2"] as const) {
       for (const mon of this.snapshot.board[side]) {
-        if (mon) mon.item = this.itemMap[side][toID(mon.name)] ?? mon.item ?? "";
+        if (!mon) continue;
+        mon.item = this.itemMap[side][toID(mon.name)] ?? mon.item ?? "";
+        mon.ability = this.abilityMap[side][toID(mon.name)] ?? mon.ability ?? "";
       }
     }
     // Attach stats to the player's own field mons (foe stats are unknown).
@@ -152,25 +163,30 @@ export class BattleController {
     return { p1: Teams.pack(p1Sets), p2: Teams.pack(p2Sets), p1Sets, p2Sets };
   }
 
-  private buildItemMap(p1Sets: any[], p2Sets: any[]) {
+  private buildTeamMaps(p1Sets: any[], p2Sets: any[]) {
     for (const [side, sets] of [["p1", p1Sets], ["p2", p2Sets]] as const) {
-      const map: Record<string, string> = {};
+      const items: Record<string, string> = {};
+      const abilities: Record<string, string> = {};
       for (const set of sets) {
         const item = itemName(set.item);
+        const ability = abilityName(set.ability);
         const sp = Dex.species.get(set.species || set.name);
         // Key by full forme AND base species: on-field names for formes like
         // Landorus-Therian display as the base "Landorus".
         for (const key of [set.species, set.name, sp.name, sp.baseSpecies]) {
-          if (key) map[toID(key)] = item;
+          if (!key) continue;
+          items[toID(key)] = item;
+          abilities[toID(key)] = ability;
         }
       }
-      this.itemMap[side] = map;
+      this.itemMap[side] = items;
+      this.abilityMap[side] = abilities;
     }
   }
 
   private start() {
     const { p1, p2, p1Sets, p2Sets } = this.teamsFor();
-    this.buildItemMap(p1Sets, p2Sets);
+    this.buildTeamMaps(p1Sets, p2Sets);
 
     const ai = new RandomPlayerAI(this.streams.p2);
     void ai.start();
@@ -263,6 +279,7 @@ export class BattleController {
         hpPct: c.hpPct,
         status: c.status,
         item: itemName(p.item),
+        ability: abilityName(p.baseAbility ?? p.ability),
         fainted: c.fainted,
         active: !!p.active,
         stats: statFor(p),
@@ -276,6 +293,7 @@ export class BattleController {
         slot: i + 1,
         name: cleanName(p.details ?? p.ident ?? "?"),
         item: itemName(p.item),
+        ability: abilityName(p.baseAbility ?? p.ability),
         stats: statFor(p),
       }));
       return;

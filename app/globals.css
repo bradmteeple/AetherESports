@@ -412,11 +412,23 @@ body {
   grid-template-columns: 1fr 1fr;
 }
 
+.mon-ability {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #c9b6ff;
+}
+
 .mon-item {
   min-height: 1rem;
   font-size: 0.78rem;
   color: #8fd6ff;
   margin-bottom: 0.35rem;
+}
+
+.switch-ability,
+.preview-ability {
+  font-size: 0.72rem;
+  color: #c9b6ff;
 }
 
 /* ---------- Team preview ---------- */
