@@ -5,9 +5,17 @@
 }
 
 body {
-  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  background: #f4f6fb;
-  color: #1a1d29;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
+    Arial, sans-serif;
+  min-height: 100vh;
+  background: radial-gradient(
+    circle at 50% 30%,
+    #1b2a5e 0%,
+    #0a0f24 55%,
+    #05060f 100%
+  );
+  background-attachment: fixed;
+  color: #f5f7ff;
   line-height: 1.5;
 }
 
@@ -18,43 +26,77 @@ body {
   flex-wrap: wrap;
   align-items: center;
   padding: 0.75rem 1.25rem;
-  background: #2b2f42;
+  background: rgba(10, 15, 36, 0.6);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid rgba(123, 91, 255, 0.25);
 }
 
 .nav-link {
-  color: #e6e9f5;
+  color: #cdd5ff;
   text-decoration: none;
   padding: 0.4rem 0.8rem;
   border-radius: 6px;
   font-size: 0.95rem;
+  transition: background 0.15s ease, color 0.15s ease;
 }
 
 .nav-link:hover {
-  background: #3d4260;
+  background: rgba(123, 91, 255, 0.25);
+  color: #ffffff;
 }
 
 /* Page container */
 .container {
-  max-width: 800px;
+  max-width: 900px;
   margin: 0 auto;
-  padding: 2rem 1.25rem;
+  padding: 2.5rem 1.25rem;
 }
 
+/* Home hero */
+.hero {
+  text-align: center;
+  padding: 2rem 0 1rem;
+}
+
+.logo {
+  font-size: clamp(3rem, 12vw, 7rem);
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  line-height: 1;
+  background: linear-gradient(90deg, #00e0ff 0%, #7b5bff 50%, #ff4ecd 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  text-shadow: 0 0 60px rgba(123, 91, 255, 0.35);
+}
+
+.tagline {
+  margin-top: 1rem;
+  font-size: clamp(0.9rem, 2.5vw, 1.2rem);
+  font-weight: 500;
+  letter-spacing: 0.35em;
+  text-transform: uppercase;
+  color: #aeb8e8;
+}
+
+/* Section page headings */
 .page-title {
   font-size: 1.75rem;
   margin-bottom: 0.5rem;
+  color: #f5f7ff;
 }
 
 .page-text {
-  color: #555b70;
+  color: #aeb8e8;
 }
 
-/* Home page buttons */
+/* Navigation buttons */
 .button-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
   gap: 1rem;
-  margin-top: 1.5rem;
+  margin-top: 2.5rem;
 }
 
 .button {
@@ -62,13 +104,18 @@ body {
   text-align: center;
   text-decoration: none;
   padding: 1.5rem 1rem;
-  background: #4a56e2;
-  color: #fff;
-  border-radius: 10px;
+  color: #ffffff;
   font-size: 1.1rem;
   font-weight: 600;
+  border-radius: 12px;
+  background: rgba(123, 91, 255, 0.18);
+  border: 1px solid rgba(123, 91, 255, 0.5);
+  transition: transform 0.15s ease, background 0.15s ease,
+    box-shadow 0.15s ease;
 }
 
 .button:hover {
-  background: #3a45c4;
+  background: rgba(123, 91, 255, 0.35);
+  box-shadow: 0 0 30px rgba(123, 91, 255, 0.4);
+  transform: translateY(-2px);
 }

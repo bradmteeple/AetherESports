@@ -1,7 +1,7 @@
 import Link from "next/link";
 
 const links = [
-  { href: "/", label: "Home" },
+  { href: "/", label: "AetherESports" },
   { href: "/social", label: "Social" },
   { href: "/team-builder", label: "Team Builder" },
   { href: "/battle", label: "Battle" },
