@@ -2,12 +2,24 @@
 // tracks the on-field state. Supports singles and doubles (two active slots per side).
 // See pokemon-showdown/sim/SIM-PROTOCOL.md (vendored) for the full spec.
 
+export interface StatBlock {
+  hp: number;
+  atk: number;
+  def: number;
+  spa: number;
+  spd: number;
+  spe: number;
+  level: number;
+  tera: string;
+}
+
 export interface ActiveMon {
   name: string;
   hpPct: number;
   status: string;
   fainted: boolean;
   item: string; // filled in by the engine from the known team lists
+  stats?: StatBlock; // player's own field mons only
 }
 
 // Each side has up to two active slots: index 0 = "a", 1 = "b" (only 0 used in singles).

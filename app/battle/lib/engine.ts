@@ -7,7 +7,7 @@
 import "./node-shim"; // must precede any @pkmn import — defines Node globals for the browser
 import { BattleStreams, Teams, RandomPlayerAI, Dex, toID } from "@pkmn/sim";
 import { TeamGenerators } from "@pkmn/randoms";
-import { describeLine, emptyBoard, type BoardState } from "./protocol";
+import { describeLine, emptyBoard, type BoardState, type StatBlock } from "./protocol";
 import { FORMATS, type FormatDef, type FormatKey } from "./formats";
 
 Teams.setGeneratorFactory(TeamGenerators);
@@ -36,12 +36,14 @@ export interface SwitchOption {
   item: string;
   fainted: boolean;
   active: boolean;
+  stats?: StatBlock;
 }
 
 export interface PreviewMon {
   slot: number; // 1-based
   name: string;
   item: string;
+  stats?: StatBlock;
 }
 
 export type Prompt = "move" | "switch" | "teampreview" | "wait" | "none";
@@ -50,6 +52,7 @@ export interface BattleSnapshot {
   format: FormatKey;
   gametype: "singles" | "doubles";
   requestId: number; // increments each new actionable request (UI reset key)
+  teamStats: Record<string, StatBlock>; // player's team, keyed by species id
   log: string[];
   board: BoardState;
   prompt: Prompt;
@@ -68,6 +71,23 @@ const itemName = (raw: string | undefined): string => {
   return it.exists ? it.name : String(raw);
 };
 
+// Build a StatBlock from a request's side.pokemon entry (player's own team).
+function statBlockFrom(p: any): StatBlock | undefined {
+  if (!p?.stats) return undefined;
+  const maxhp = parseInt(String(p.condition ?? "").split(" ")[0].split("/")[1] ?? "0", 10) || 0;
+  const lm = /,\s*L(\d+)/.exec(String(p.details ?? ""));
+  return {
+    hp: maxhp,
+    atk: p.stats.atk ?? 0,
+    def: p.stats.def ?? 0,
+    spa: p.stats.spa ?? 0,
+    spd: p.stats.spd ?? 0,
+    spe: p.stats.spe ?? 0,
+    level: lm ? parseInt(lm[1], 10) : 100,
+    tera: p.teraType ?? "",
+  };
+}
+
 export class BattleController {
   private streams: ReturnType<typeof BattleStreams.getPlayerStreams>;
   private destroyed = false;
@@ -83,6 +103,7 @@ export class BattleController {
       format,
       gametype: this.def.gametype,
       requestId: 0,
+      teamStats: {},
       log: [],
       board: emptyBoard(),
       prompt: "none",
@@ -105,6 +126,10 @@ export class BattleController {
       for (const mon of this.snapshot.board[side]) {
         if (mon) mon.item = this.itemMap[side][toID(mon.name)] ?? mon.item ?? "";
       }
+    }
+    // Attach stats to the player's own field mons (foe stats are unknown).
+    for (const mon of this.snapshot.board.p1) {
+      if (mon) mon.stats = this.snapshot.teamStats[toID(mon.name)];
     }
     this.onUpdate({ ...this.snapshot, log: [...this.snapshot.log] });
   }
@@ -213,7 +238,23 @@ export class BattleController {
     const req = JSON.parse(json);
     const side = req.side;
 
-    // Bench / switch options (shared) — includes item info for the player's team.
+    // Update the player's team stat sheet (keyed forme-safe, persisted across requests).
+    for (const p of side?.pokemon ?? []) {
+      const block = statBlockFrom(p);
+      if (!block) continue;
+      const sp = Dex.species.get(cleanName(p.details ?? p.ident ?? ""));
+      for (const key of [cleanName(p.details ?? ""), sp.name, sp.baseSpecies]) {
+        if (!key) continue;
+        const id = toID(key);
+        const prev = this.snapshot.teamStats[id];
+        // Keep a previously-seen max HP if this snapshot has the mon fainted (hp 0).
+        this.snapshot.teamStats[id] = { ...block, hp: block.hp || prev?.hp || 0 };
+      }
+    }
+    const statFor = (p: any): StatBlock | undefined =>
+      this.snapshot.teamStats[toID(cleanName(p.details ?? p.ident ?? ""))];
+
+    // Bench / switch options (shared) — includes item + stats for the player's team.
     this.snapshot.switches = (side?.pokemon ?? []).map((p: any, i: number) => {
       const c = parseCond(p.condition ?? "0/0");
       return {
@@ -224,6 +265,7 @@ export class BattleController {
         item: itemName(p.item),
         fainted: c.fainted,
         active: !!p.active,
+        stats: statFor(p),
       };
     });
 
@@ -234,6 +276,7 @@ export class BattleController {
         slot: i + 1,
         name: cleanName(p.details ?? p.ident ?? "?"),
         item: itemName(p.item),
+        stats: statFor(p),
       }));
       return;
     }
