@@ -153,6 +153,9 @@ body {
 }
 
 .mon-card {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
   background: rgba(10, 15, 36, 0.6);
   border: 1px solid rgba(123, 91, 255, 0.3);
   border-radius: 12px;
@@ -161,6 +164,31 @@ body {
 
 .mon-card--foe {
   border-color: rgba(255, 78, 205, 0.35);
+  /* Opponent sprite sits on the right, echoing the Showdown battle scene. */
+  flex-direction: row-reverse;
+}
+
+.mon-body {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+}
+
+.mon-sprite {
+  width: 84px;
+  height: 84px;
+  flex-shrink: 0;
+  object-fit: contain;
+  image-rendering: pixelated;
+  filter: drop-shadow(0 3px 6px rgba(0, 0, 0, 0.45));
+}
+
+.mon-thumb {
+  width: 34px;
+  height: 34px;
+  object-fit: contain;
+  image-rendering: pixelated;
+  vertical-align: middle;
 }
 
 .mon-card-head {

@@ -5,6 +5,7 @@ import type { BattleSnapshot, MoveOption, SwitchOption } from "./lib/engine";
 import type { ActiveMon, BoardState, StatBlock } from "./lib/protocol";
 import { FORMAT_LIST, FORMATS, type FormatKey } from "./lib/formats";
 import { needsTarget, targetOptions } from "./lib/choices";
+import { pokeSprite, pokeThumb } from "./lib/sprites";
 
 export default function BattlePage() {
   const [selectedFormat, setSelectedFormat] = useState<FormatKey>("gen9randombattle");
@@ -206,6 +207,21 @@ function FieldSide({
   );
 }
 
+function Thumb({ name }: { name: string }) {
+  const url = pokeThumb(name);
+  if (!url) return null;
+  return (
+    <img
+      className="mon-thumb"
+      src={url}
+      alt=""
+      onError={(e) => {
+        e.currentTarget.style.display = "none";
+      }}
+    />
+  );
+}
+
 function StatPop({ stats }: { stats?: StatBlock }) {
   if (!stats) return null;
   const cells: [string, number][] = [
@@ -235,12 +251,26 @@ function StatPop({ stats }: { stats?: StatBlock }) {
 }
 
 function MonCard({ mon, sideLabel, foe }: { mon: ActiveMon | null; sideLabel: string; foe?: boolean }) {
+  const sprite = mon && !mon.fainted ? pokeSprite(mon.name, !!foe) : null;
   return (
-    <div
-      className={"mon-card" + (foe ? " mon-card--foe" : "") + (mon?.stats ? " has-pop" : "")}
-      tabIndex={mon?.stats ? 0 : undefined}
-    >
-      <div className="mon-card-head">
+    <div className={"mon-card" + (foe ? " mon-card--foe" : "")}>
+      {sprite && (
+        <img
+          className="mon-sprite"
+          src={sprite.url}
+          alt={mon?.name ?? ""}
+          width={sprite.w}
+          height={sprite.h}
+          onError={(e) => {
+            e.currentTarget.style.display = "none";
+          }}
+        />
+      )}
+      <div
+        className={"mon-body" + (mon?.stats ? " has-pop" : "")}
+        tabIndex={mon?.stats ? 0 : undefined}
+      >
+        <div className="mon-card-head">
         <span className="mon-side">{sideLabel}</span>
         <span className="mon-name">{mon ? mon.name : "—"}</span>
         {mon?.status && <span className="mon-status">{mon.status.toUpperCase()}</span>}
@@ -257,7 +287,8 @@ function MonCard({ mon, sideLabel, foe }: { mon: ActiveMon | null; sideLabel: st
           style={{ width: `${mon ? mon.hpPct : 0}%` }}
         />
       </div>
-      <div className="hp-label">{mon ? (mon.fainted ? "Fainted" : `${mon.hpPct}%`) : ""}</div>
+        <div className="hp-label">{mon ? (mon.fainted ? "Fainted" : `${mon.hpPct}%`) : ""}</div>
+      </div>
     </div>
   );
 }
@@ -332,6 +363,7 @@ function TeamPreviewPanel({ snapshot, choose }: { snapshot: BattleSnapshot; choo
               onClick={() => toggle(p.slot)}
             >
               {idx >= 0 && <span className="preview-order">{idx + 1}</span>}
+              <Thumb name={p.name} />
               <span className="preview-name">{p.name}</span>
               {p.ability && <span className="preview-ability">{p.ability}</span>}
               <span className="preview-item">{p.item ? `@ ${p.item}` : "no item"}</span>
@@ -538,6 +570,7 @@ function SwitchButtons({
           className={"switch-btn" + (s.stats ? " has-pop" : "")}
           onClick={() => onSwitch(s.slot)}
         >
+          <Thumb name={s.name} />
           <span className="switch-name">{s.name}</span>
           {s.ability && <span className="switch-ability">{s.ability}</span>}
           <span className="switch-hp">
