@@ -9,6 +9,7 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@pkmn/img": "^0.3.4",
     "@pkmn/randoms": "^0.10.11",
     "@pkmn/sim": "^0.10.11",
     "next": "14.2.5",
