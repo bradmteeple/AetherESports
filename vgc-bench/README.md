@@ -128,20 +128,21 @@ The strength tiers are defined in [vgc_bench/src/levels.py](vgc_bench/src/levels
 
 Level 3 is designed to get **stronger the more you play it**, by learning to exploit how *you* play. It always loads the newest checkpoint in its saves directory, so appending stronger checkpoints between sessions makes the opponent you face next tuned to counter your tendencies.
 
-[improve.py](vgc_bench/improve.py) runs one self-improvement pass end to end, orchestrating the existing BC + PSRO-Exploiter pipeline:
+The full loop runs against your **local** Showdown server — the games you play against the bot become its training data:
 
 ```bash
-# 1. Put your games against the bot in battle_logs/logs_<format>.json
-#    (same shape scrape_logs.py produces: {battle_id: [uploadtime, raw_log]}, OTS).
-# 2. Learn from them:
+# 1. Host a local server:  node pokemon-showdown start --no-security   (from pokemon-showdown/)
+# 2. Run the bot with capture on, then challenge it from http://localhost:8000
+python -m vgc_bench.play --username <bot> --reg mb --level 3 --method bc_ex --save-logs -n 20
+#    -> every finished game is written to battle_logs/logs_<format>.json
+# 3. Fold those games into a stronger Level 3:
 python -m vgc_bench.improve --reg mb --run_id 1 --total_steps 983040
-# 3. Face the improved Level 3 (note --method bc_ex):
-python -m vgc_bench.play --username <name> --reg mb --level 3 --method bc_ex
+# 4. Repeat step 2 — the bot you now face is tuned to counter how you play.
 ```
 
-Under the hood it chains: `logs2trajs` (your logs → trajectories) → `pretrain` (behavior-clones a model of *you*) → installs that model as the exploiter's fixed opponent (`-1.zip`) → `train --exploiter` (trains a policy to beat the model of you). Run it again after more games to compound. Use `--dry-run` to preview the exact commands and paths without executing.
+`--save-logs` reconstructs each completed game from poke-env's battle data ([vgc_bench/src/log_capture.py](vgc_bench/src/log_capture.py)) into the exact `{battle_id: [uploadtime, raw_log]}` shape the pipeline expects, accumulating across sessions. [improve.py](vgc_bench/improve.py) then chains: `logs2trajs` (your logs → trajectories) → `pretrain` (behavior-clones a model of *you*) → installs that as the exploiter's fixed opponent (`-1.zip`) → `train --exploiter` (trains a policy to beat the model of you). Use `python -m vgc_bench.improve --dry-run` to preview the exact commands and paths.
 
-> Requires a CUDA GPU, the ML extras (`pip install .[dev]`), and a running pokemon-showdown server (same as `train.py`). `improve.py` consumes whatever is in `battle_logs/`; collecting your games there (e.g. via saved Showdown replays scraped with [scrape_logs.py](vgc_bench/scrape_logs.py), filtered to your username) is the one manual step, since replay capture depends on your play setup.
+> Requires a CUDA GPU, the ML extras (`pip install .[dev]`), and a running pokemon-showdown server (same as `train.py`). Capture works for any regulation. To personalize purely to *your* play (rather than both sides of each game), filter trajectories to your username — a small planned refinement to `logs2trajs`.
 
 ## 📊 Evaluation
 

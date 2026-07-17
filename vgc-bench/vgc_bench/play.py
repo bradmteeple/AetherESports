@@ -13,6 +13,7 @@ from poke_env import AccountConfiguration, ShowdownServerConfiguration
 from torch import device
 
 from vgc_bench.src.levels import LEVEL_CONFIGS, level_from_int, make_opponent
+from vgc_bench.src.log_capture import save_battle_logs
 from vgc_bench.src.policy import MaskedActorCriticPolicy
 from vgc_bench.src.policy_player import PolicyPlayer
 from vgc_bench.src.teams import RandomTeamBuilder, get_available_regs
@@ -30,6 +31,7 @@ async def play(
     n_games: int,
     play_on_ladder: bool,
     level: int,
+    save_logs: bool,
 ):
     """
     Run a difficulty-tiered opponent in interactive play mode.
@@ -48,6 +50,8 @@ async def play(
         play_on_ladder: If True, play on ladder; if False, accept challenges.
         level: Difficulty level (1=day-2 regional, 2=regional champion,
             3=world champion).
+        save_logs: If True, save every completed game to battle_logs/ so it can
+            feed the self-improvement loop (python -m vgc_bench.improve).
     """
     assert not (play_on_ladder and reg is None), "ladder mode requires a specific --reg"
     print("Setting up...")
@@ -83,13 +87,21 @@ async def play(
         assert isinstance(agent.policy, MaskedActorCriticPolicy)
         agent.policy.debug = True
     print(f"Ready: {cfg.description} ({level_from_int(level).label})")
-    if play_on_ladder:
-        print("Entering ladder")
-        await agent.ladder(n_games=n_games)
-        print(f"{agent.n_won_battles}-{agent.n_lost_battles}-{agent.n_tied_battles}")
-    else:
-        print("Awaiting challenges")
-        await agent.accept_challenges(opponent=None, n_challenges=n_games)
+    try:
+        if play_on_ladder:
+            print("Entering ladder")
+            await agent.ladder(n_games=n_games)
+            print(f"{agent.n_won_battles}-{agent.n_lost_battles}-{agent.n_tied_battles}")
+        else:
+            print("Awaiting challenges")
+            await agent.accept_challenges(opponent=None, n_challenges=n_games)
+    finally:
+        if save_logs:
+            battles = getattr(agent, "battles", None)
+            if battles is None:
+                battles = getattr(agent, "_battles", {})
+            written = save_battle_logs(battles)
+            print(f"Saved {written} game log(s) to battle_logs/ for self-improvement")
 
 
 if __name__ == "__main__":
@@ -142,6 +154,13 @@ if __name__ == "__main__":
         help="Difficulty: 1=day-2 regional player, 2=regional champion, "
         "3=world champion (default).",
     )
+    parser.add_argument(
+        "--save-logs",
+        dest="save_logs",
+        action="store_true",
+        help="Save completed games to battle_logs/ to feed the self-improvement "
+        "loop (python -m vgc_bench.improve).",
+    )
     args = parser.parse_args()
     reg = args.reg.lower() if args.reg is not None else None
     asyncio.run(
@@ -156,5 +175,6 @@ if __name__ == "__main__":
             args.n,
             args.l,
             args.level,
+            args.save_logs,
         )
     )
