@@ -7,7 +7,7 @@
 import "./node-shim"; // must precede any @pkmn import — defines Node globals for the browser
 import { BattleStreams, Teams, Dex, toID } from "@pkmn/sim";
 import { TeamGenerators } from "@pkmn/randoms";
-import { ReasoningAI } from "./ai";
+import { ReasoningAI, AdaptiveAI } from "./ai";
 import { describeLine, emptyBoard, type BoardState, type StatBlock } from "./protocol";
 import { FORMATS, type FormatDef, type FormatKey } from "./formats";
 
@@ -109,8 +109,11 @@ export class BattleController {
   private reasonsByTurn: Record<number, string[]> = {};
   private maxTurn = 0;
 
-  constructor(format: FormatKey, onUpdate: (s: BattleSnapshot) => void) {
+  private level: number;
+
+  constructor(format: FormatKey, level: number, onUpdate: (s: BattleSnapshot) => void) {
     this.def = FORMATS[format];
+    this.level = level;
     this.onUpdate = onUpdate;
     this.snapshot = {
       format,
@@ -197,12 +200,17 @@ export class BattleController {
     const { p1, p2, p1Sets, p2Sets } = this.teamsFor();
     this.buildTeamMaps(p1Sets, p2Sets);
 
-    const ai = new ReasoningAI(this.streams.p2, (turn, reasons) => {
+    const onReason = (turn: number, reasons: string[]) => {
       // Accumulate a turn's reasons (moves + any mid-turn forced switch), de-duplicated.
       const merged = [...(this.reasonsByTurn[turn] ?? []), ...reasons];
       this.reasonsByTurn[turn] = Array.from(new Set(merged));
       this.emit();
-    });
+    };
+    // Level 1 = weakened heuristic, Level 2 = full heuristic, Level 3 = adaptive (learns).
+    const ai =
+      this.level >= 3
+        ? new AdaptiveAI(this.streams.p2, onReason)
+        : new ReasoningAI(this.streams.p2, onReason, { mistakeRate: this.level <= 1 ? 0.5 : 0 });
     void ai.start();
     void this.readPlayerStream();
 

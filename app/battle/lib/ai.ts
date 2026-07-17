@@ -1,13 +1,13 @@
-// A lightweight *reasoning* opponent for the Battle tab.
+// Reasoning opponents for the Battle tab.
 //
-// Extends Showdown's RandomPlayerAI (reusing its team-preview / forced-switch / doubles
-// choice-assembly), but overrides move selection: it scores each candidate move by
-// base power × type effectiveness × STAB, picks the best move (and best target in doubles),
-// and records a plain-English rationale. Those rationales are reported per turn so the UI
-// can show "why the Rival AI made the move it made".
+// ReasoningAI scores each candidate move by base power × type effectiveness × STAB, picks the
+// best (and best target in doubles), and records a plain-English rationale. A `mistakeRate`
+// weakens it (Level 1) by sometimes taking a random move. AdaptiveAI (Level 3) extends it with
+// cross-game learning persisted in localStorage: it remembers the player's move tendencies and a
+// per-game skill ramp, biasing toward KO-ing the player's most-dangerous Pokémon.
 
 import "./node-shim"; // must precede any @pkmn import — defines Node globals for the browser
-import { RandomPlayerAI, Dex } from "@pkmn/sim";
+import { RandomPlayerAI, Dex, toID } from "@pkmn/sim";
 
 type Side = "p1" | "p2";
 
@@ -49,21 +49,36 @@ function effWord(mult: number): string {
   return `not very effective (${mult}×)`;
 }
 
+interface MoveCtx {
+  mySpecies: string;
+  myTypes: string[];
+  foes: { slot: number; species: string; types: string[] }[];
+  doubles: boolean;
+}
+
+interface Scored {
+  choice: string;
+  score: number;
+  rationale: string;
+}
+
 export class ReasoningAI extends RandomPlayerAI {
-  private turn = 0;
-  private reqActiveLen = 1;
-  private slotCursor = 0;
-  private reasons: string[] = [];
-  private activeSp: Record<Side, (string | null)[]> = { p1: [null, null], p2: [null, null] };
+  protected turn = 0;
+  protected reqActiveLen = 1;
+  protected slotCursor = 0;
+  protected reasons: string[] = [];
+  protected activeSp: Record<Side, (string | null)[]> = { p1: [null, null], p2: [null, null] };
+  protected readonly mistakeRate: number;
   private readonly report: (turn: number, reasons: string[]) => void;
 
   constructor(
     playerStream: any,
     report: (turn: number, reasons: string[]) => void,
-    seed?: any
+    opts: { mistakeRate?: number; seed?: any } = {}
   ) {
-    super(playerStream, { move: 1.0, seed: seed ?? null });
+    super(playerStream, { move: 1.0, seed: opts.seed ?? null });
     this.report = report;
+    this.mistakeRate = opts.mistakeRate ?? 0;
   }
 
   override receiveLine(line: string) {
@@ -71,16 +86,16 @@ export class ReasoningAI extends RandomPlayerAI {
     this.track(line);
   }
 
-  private pos(ident: string): { side: Side | ""; slot: number } {
+  protected pos(ident: string): { side: Side | ""; slot: number } {
     const m = /^(p[12])([a-c])/.exec(ident || "");
     if (!m) return { side: "", slot: 0 };
     const slot = m[2] === "b" ? 1 : m[2] === "c" ? 2 : 0;
     return { side: m[1] as Side, slot };
   }
 
-  private track(line: string) {
+  protected track(line: string) {
     if (!line.startsWith("|")) return;
-    const parts = line.split("|"); // ["", cmd, ...]
+    const parts = line.split("|");
     const cmd = parts[1];
     if (cmd === "turn") {
       this.turn = parseInt(parts[2], 10) || this.turn;
@@ -97,12 +112,15 @@ export class ReasoningAI extends RandomPlayerAI {
     this.reasons = [];
     this.slotCursor = 0;
     this.reqActiveLen = request?.active?.length ?? 1;
+    this.beforeChoices(request);
     super.receiveRequest(request);
     if (this.reasons.length) this.report(this.turn, [...this.reasons]);
   }
 
-  // Foe (from the AI's perspective) is p1; return alive active mons with their slot index.
-  private foes(): { slot: number; species: string; types: string[] }[] {
+  /** Hook for subclasses to push a leading note before per-slot choices are made. */
+  protected beforeChoices(_request: any) {}
+
+  protected foes(): { slot: number; species: string; types: string[] }[] {
     const out: { slot: number; species: string; types: string[] }[] = [];
     this.activeSp.p1.forEach((sp, i) => {
       if (!sp) return;
@@ -112,8 +130,7 @@ export class ReasoningAI extends RandomPlayerAI {
     return out;
   }
 
-  private effectiveness(moveType: string, foeTypes: string[]): number {
-    // 0 if immune, else 2^(sum of type-chart exponents)
+  protected effectiveness(moveType: string, foeTypes: string[]): number {
     for (const t of foeTypes) {
       if (!Dex.getImmunity(moveType, t)) return 0;
     }
@@ -122,68 +139,69 @@ export class ReasoningAI extends RandomPlayerAI {
     return Math.pow(2, exp);
   }
 
+  /** Relative importance of hitting a given foe. Base: all foes equal. */
+  protected foeWeight(_foeSpecies: string): number {
+    return 1;
+  }
+
+  protected scoreMove(choice: string, move: any, ctx: MoveCtx): Scored {
+    const mv = Dex.moves.get(move.move);
+    const name = mv.name || move.move;
+    const who = ctx.mySpecies || "Rival AI";
+
+    if (mv.category === "Status") {
+      const hint = STATUS_HINTS[mv.id];
+      return { choice, score: 25, rationale: `${who} used ${name} ${hint ?? "for utility"}.` };
+    }
+
+    const stab = ctx.myTypes.includes(mv.type) ? 1.5 : 1;
+    const bp = mv.basePower || 60;
+    const targeted = ["normal", "any", "adjacentFoe"].includes(move.target);
+
+    let bestMult = 1;
+    let bestFoe: MoveCtx["foes"][number] | undefined;
+    let bestScore = bp * 1 * stab;
+    if (ctx.foes.length) {
+      bestScore = -1;
+      for (const f of ctx.foes) {
+        const mult = this.effectiveness(mv.type, f.types);
+        const w = bp * mult * stab * this.foeWeight(f.species);
+        if (w > bestScore) {
+          bestScore = w;
+          bestMult = mult;
+          bestFoe = f;
+        }
+      }
+    }
+
+    let finalChoice = choice;
+    if (ctx.doubles && targeted && bestFoe) {
+      finalChoice = `move ${move.slot} ${bestFoe.slot + 1}${move.zMove ? " zmove" : ""}`;
+    }
+
+    const target = bestFoe?.species;
+    const rationale =
+      `${who} used ${name}` +
+      (target ? ` on ${target}` : "") +
+      ` — ${effWord(bestMult)}` +
+      (stab > 1 && bestMult > 0 ? ", boosted by STAB" : "") +
+      ".";
+
+    return { choice: finalChoice, score: bestScore, rationale };
+  }
+
   override chooseMove(active: any, moves: { choice: string; move: any }[]): string {
     const slot = this.slotCursor++;
     const doubles = this.reqActiveLen > 1;
     const mySpecies = this.activeSp.p2[slot] || "";
     const myTypes = mySpecies ? Dex.species.get(mySpecies).types ?? [] : [];
-    const foes = this.foes();
+    const ctx: MoveCtx = { mySpecies, myTypes, foes: this.foes(), doubles };
 
-    interface Scored {
-      choice: string;
-      score: number;
-      rationale: string;
-    }
-    const scored: Scored[] = moves.map(({ choice, move }) => {
-      const mv = Dex.moves.get(move.move);
-      const name = mv.name || move.move;
-      const who = mySpecies || "Rival AI";
+    const scored = moves.map(({ choice, move }) => this.scoreMove(choice, move, ctx));
+    const best = scored.slice().sort((a, b) => b.score - a.score)[0];
+    const mistake = this.mistakeRate > 0 && this.prng.random() < this.mistakeRate;
+    const pick = (mistake ? scored[this.prng.random(scored.length)] : best) ?? best;
 
-      if (mv.category === "Status") {
-        const hint = STATUS_HINTS[mv.id];
-        return {
-          choice,
-          score: 25,
-          rationale: `${who} used ${name} ${hint ?? "for utility"}.`,
-        };
-      }
-
-      const stab = myTypes.includes(mv.type) ? 1.5 : 1;
-      const bp = mv.basePower || 60; // variable-power moves treated as ~60
-
-      // Best foe target for this move.
-      const targeted = ["normal", "any", "adjacentFoe"].includes(move.target);
-      let best: { mult: number; foe?: (typeof foes)[number] } = { mult: 1 };
-      if (foes.length) {
-        best = { mult: -1 };
-        for (const f of foes) {
-          const mult = this.effectiveness(mv.type, f.types);
-          if (mult > best.mult) best = { mult, foe: f };
-        }
-      }
-      const mult = best.mult < 0 ? 1 : best.mult;
-      const score = bp * mult * stab;
-
-      // Rewrite the target only for foe-targeting moves in doubles; otherwise keep the
-      // parent's ready-made choice string (handles ally/self/spread targeting correctly).
-      let finalChoice = choice;
-      if (doubles && targeted && best.foe) {
-        finalChoice = `move ${move.slot} ${best.foe.slot + 1}${move.zMove ? " zmove" : ""}`;
-      }
-
-      const target = best.foe?.species;
-      const rationale =
-        `${who} used ${name}` +
-        (target ? ` on ${target}` : "") +
-        ` — ${effWord(mult)}` +
-        (stab > 1 && mult > 0 ? ", boosted by STAB" : "") +
-        ".";
-
-      return { choice: finalChoice, score, rationale };
-    });
-
-    scored.sort((a, b) => b.score - a.score);
-    const pick = scored[0];
     this.reasons.push(pick.rationale);
     return pick.choice;
   }
@@ -194,5 +212,124 @@ export class ReasoningAI extends RandomPlayerAI {
     const sp = p ? cleanName(p.pokemon.details) : "";
     if (sp) this.reasons.push(`Rival AI sent out ${sp}.`);
     return slot;
+  }
+}
+
+// ------------------------------------------------------------------ Adaptive (Level 3) --------
+
+interface Book {
+  games: number;
+  moves: Record<string, Record<string, number>>; // speciesId -> moveId -> count
+}
+
+const BOOK_KEY = "aether-ai-book";
+
+function loadBook(): Book {
+  try {
+    const raw = localStorage.getItem(BOOK_KEY);
+    if (raw) {
+      const b = JSON.parse(raw);
+      return { games: b.games || 0, moves: b.moves || {} };
+    }
+  } catch {
+    /* localStorage unavailable */
+  }
+  return { games: 0, moves: {} };
+}
+
+function saveBook(b: Book) {
+  try {
+    localStorage.setItem(BOOK_KEY, JSON.stringify(b));
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * Level 3: full-strength heuristic that improves every game.
+ * - Skill ramps with the number of games played (persisted).
+ * - Learns the player's move tendencies per species across games and biases toward KO-ing the
+ *   player's most-dangerous Pokémon.
+ */
+export class AdaptiveAI extends ReasoningAI {
+  private book: Book;
+  private skill: number;
+  private gameMoves: Record<string, Record<string, number>> = {};
+  private saved = false;
+  private noted = false;
+
+  constructor(playerStream: any, report: (turn: number, reasons: string[]) => void, seed?: any) {
+    super(playerStream, report, { mistakeRate: 0, seed });
+    this.book = loadBook();
+    this.skill = Math.max(0.2, Math.min(1, this.book.games / 8));
+  }
+
+  protected override track(line: string) {
+    super.track(line);
+    if (!line.startsWith("|")) return;
+    const parts = line.split("|");
+    const cmd = parts[1];
+    if (cmd === "move") {
+      const { side, slot } = this.pos(parts[2]);
+      if (side === "p1") {
+        const sp = this.activeSp.p1[slot] || "";
+        const mv = toID(parts[3] || "");
+        if (sp && mv) {
+          const id = toID(sp);
+          const bucket = (this.gameMoves[id] ??= {});
+          bucket[mv] = (bucket[mv] || 0) + 1;
+        }
+      }
+    } else if (cmd === "win" || cmd === "tie") {
+      this.persist();
+    }
+  }
+
+  private persist() {
+    if (this.saved) return;
+    this.saved = true;
+    for (const [sp, mvs] of Object.entries(this.gameMoves)) {
+      const dst = (this.book.moves[sp] ??= {});
+      for (const [mv, n] of Object.entries(mvs)) dst[mv] = (dst[mv] || 0) + n;
+    }
+    this.book.games += 1;
+    saveBook(this.book);
+  }
+
+  private bestKnownMove(foeSpecies: string): { id: string; bp: number } | null {
+    const book = this.book.moves[toID(foeSpecies)];
+    if (!book) return null;
+    let id = "";
+    let n = 0;
+    for (const [mv, c] of Object.entries(book)) if (c > n) ((n = c), (id = mv));
+    if (!id) return null;
+    return { id, bp: Dex.moves.get(id).basePower || 0 };
+  }
+
+  private threatOf(foeSpecies: string): number {
+    const best = this.bestKnownMove(foeSpecies);
+    return best ? Math.min(1, best.bp / 120) : 0;
+  }
+
+  protected override foeWeight(foeSpecies: string): number {
+    return 1 + this.skill * this.threatOf(foeSpecies);
+  }
+
+  protected override beforeChoices(request: any) {
+    if (this.noted || !request?.active || this.skill < 0.35) return;
+    let top: { species: string } | null = null;
+    let topThreat = 0;
+    for (const f of this.foes()) {
+      const t = this.threatOf(f.species);
+      if (t > topThreat) ((topThreat = t), (top = f));
+    }
+    if (top && topThreat > 0) {
+      const best = this.bestKnownMove(top.species);
+      const mvName = best ? Dex.moves.get(best.id).name || best.id : "its best move";
+      this.reasons.push(
+        `Learned from past games: your ${top.species} likes ${mvName} — prioritizing it.`
+      );
+      this.noted = true;
+    }
   }
 }

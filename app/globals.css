@@ -402,6 +402,58 @@ body {
   max-width: 640px;
 }
 
+/* ---------- AI level picker ---------- */
+.level-picker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0 0 1.25rem;
+}
+
+.level-label {
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: #8b95c9;
+  margin-right: 0.25rem;
+}
+
+.level-btn {
+  position: relative;
+  padding: 0.4rem 0.85rem;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 78, 205, 0.4);
+  background: rgba(255, 78, 205, 0.1);
+  color: #cdd5ff;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 600;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.level-btn--on {
+  background: rgba(255, 78, 205, 0.25);
+  border-color: rgba(255, 78, 205, 0.75);
+  color: #ffffff;
+  box-shadow: 0 0 16px rgba(255, 78, 205, 0.25);
+}
+
+.level-tip {
+  width: 240px;
+  max-width: 240px;
+  /* Open downward — the level picker sits near the top of the page. */
+  top: calc(100% + 8px);
+  bottom: auto;
+}
+
+.tip-text {
+  display: block;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  color: #eef1ff;
+}
+
 /* ---------- Field (singles + doubles) ---------- */
 .field-side {
   display: grid;

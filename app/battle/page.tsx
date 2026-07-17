@@ -9,6 +9,8 @@ import { needsTarget, targetOptions } from "./lib/choices";
 export default function BattlePage() {
   const [selectedFormat, setSelectedFormat] = useState<FormatKey>("gen9randombattle");
   const [runningFormat, setRunningFormat] = useState<FormatKey>("gen9randombattle");
+  const [selectedLevel, setSelectedLevel] = useState(2);
+  const [runningLevel, setRunningLevel] = useState(2);
   const [snapshot, setSnapshot] = useState<BattleSnapshot | null>(null);
   const [battleKey, setBattleKey] = useState(0);
   const [whyOpen, setWhyOpen] = useState(false);
@@ -23,7 +25,7 @@ export default function BattlePage() {
     (async () => {
       const { BattleController } = await import("./lib/engine");
       if (cancelled) return;
-      controller = new BattleController(runningFormat, (s) => setSnapshot(s));
+      controller = new BattleController(runningFormat, runningLevel, (s) => setSnapshot(s));
       chooseRef.current = (c) => controller!.choose(c);
     })();
 
@@ -32,7 +34,7 @@ export default function BattlePage() {
       controller?.destroy();
       chooseRef.current = null;
     };
-  }, [battleKey, runningFormat]);
+  }, [battleKey, runningFormat, runningLevel]);
 
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -40,8 +42,9 @@ export default function BattlePage() {
 
   const newBattle = useCallback(() => {
     setRunningFormat(selectedFormat);
+    setRunningLevel(selectedLevel);
     setBattleKey((k) => k + 1);
-  }, [selectedFormat]);
+  }, [selectedFormat, selectedLevel]);
 
   const choose = useCallback((c: string) => chooseRef.current?.(c), []);
 
@@ -65,6 +68,36 @@ export default function BattlePage() {
         <button className="battle-btn" onClick={newBattle}>
           ↻ New Battle
         </button>
+      </div>
+
+      <div className="level-picker">
+        <span className="level-label">AI level:</span>
+        {[
+          { n: 1, label: "1 · Rookie" },
+          { n: 2, label: "2 · Skilled" },
+          {
+            n: 3,
+            label: "3 · Adaptive",
+            tip: "Designed to improve with every game you play against it — it learns your tendencies and sharpens each game.",
+          },
+        ].map((lvl) => (
+          <button
+            key={lvl.n}
+            className={
+              "level-btn" +
+              (selectedLevel === lvl.n ? " level-btn--on" : "") +
+              (lvl.tip ? " has-pop" : "")
+            }
+            onClick={() => setSelectedLevel(lvl.n)}
+          >
+            {lvl.label}
+            {lvl.tip && (
+              <span className="stat-tooltip level-tip" role="tooltip">
+                <span className="tip-text">{lvl.tip}</span>
+              </span>
+            )}
+          </button>
+        ))}
       </div>
 
       {FORMATS[selectedFormat].note && (
