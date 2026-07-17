@@ -17,10 +17,24 @@ export default function BattlePage() {
   const [started, setStarted] = useState(false);
   const [whyOpen, setWhyOpen] = useState(false);
   const [customTeam, setCustomTeam] = useState<{ packed: string; species: string[] } | null>(null);
-  const [customDoubles, setCustomDoubles] = useState(false);
   const [runningCustom, setRunningCustom] = useState<CustomTeam | undefined>(undefined);
   const logEndRef = useRef<HTMLDivElement | null>(null);
   const chooseRef = useRef<((choice: string) => void) | null>(null);
+
+  // The Rival AI team is always assumed to be for the currently selected format,
+  // so its singles/doubles nature follows that format rather than a manual toggle.
+  const selectedDoubles = FORMATS[selectedFormat].gametype === "doubles";
+
+  // Switching formats clears any loaded Rival AI team — a team pasted for one
+  // format shouldn't silently carry over into a different one.
+  const selectFormat = useCallback(
+    (key: FormatKey) => {
+      if (key === selectedFormat) return;
+      setSelectedFormat(key);
+      setCustomTeam(null);
+    },
+    [selectedFormat]
+  );
 
   useEffect(() => {
     if (!started) return; // wait for the user to press Start Battle
@@ -49,10 +63,10 @@ export default function BattlePage() {
   const startBattle = useCallback(() => {
     setRunningFormat(selectedFormat);
     setRunningLevel(selectedLevel);
-    setRunningCustom(customTeam ? { aiTeam: customTeam.packed, doubles: customDoubles } : undefined);
+    setRunningCustom(customTeam ? { aiTeam: customTeam.packed, doubles: selectedDoubles } : undefined);
     setStarted(true);
     setBattleKey((k) => k + 1);
-  }, [selectedFormat, selectedLevel, customTeam, customDoubles]);
+  }, [selectedFormat, selectedLevel, customTeam, selectedDoubles]);
 
   const choose = useCallback((c: string) => chooseRef.current?.(c), []);
 
@@ -60,8 +74,8 @@ export default function BattlePage() {
     <div className="battle-page">
       <CustomTeamPanel
         team={customTeam}
-        doubles={customDoubles}
-        onDoubles={setCustomDoubles}
+        formatLabel={FORMATS[selectedFormat].label}
+        doubles={selectedDoubles}
         onLoad={setCustomTeam}
         onClear={() => setCustomTeam(null)}
       />
@@ -75,7 +89,7 @@ export default function BattlePage() {
           <button
             key={f.key}
             className={"format-btn" + (selectedFormat === f.key ? " format-btn--on" : "")}
-            onClick={() => setSelectedFormat(f.key)}
+            onClick={() => selectFormat(f.key)}
           >
             {f.label}
           </button>
@@ -159,14 +173,14 @@ export default function BattlePage() {
 
 function CustomTeamPanel({
   team,
+  formatLabel,
   doubles,
-  onDoubles,
   onLoad,
   onClear,
 }: {
   team: { packed: string; species: string[] } | null;
+  formatLabel: string;
   doubles: boolean;
-  onDoubles: (b: boolean) => void;
   onLoad: (t: { packed: string; species: string[] }) => void;
   onClear: () => void;
 }) {
@@ -202,8 +216,8 @@ function CustomTeamPanel({
       {team ? (
         <>
           <p className="ct-note">
-            Using your custom team ({team.species.length}) in a {doubles ? "Doubles" : "Singles"} Custom
-            Game.
+            Using your custom team ({team.species.length}) as the Rival AI for {formatLabel} (
+            {doubles ? "Doubles" : "Singles"}).
           </p>
           <ul className="ct-list">
             {team.species.map((s, i) => (
@@ -226,10 +240,10 @@ function CustomTeamPanel({
             value={text}
             onChange={(e) => setText(e.target.value)}
           />
-          <label className="ct-doubles">
-            <input type="checkbox" checked={doubles} onChange={(e) => onDoubles(e.target.checked)} />{" "}
-            Doubles
-          </label>
+          <p className="ct-note">
+            This team will play as the Rival AI for {formatLabel} ({doubles ? "Doubles" : "Singles"}).
+            Changing the format clears it.
+          </p>
           <button className="battle-btn" disabled={busy || !text.trim()} onClick={load}>
             {busy ? "Loading…" : "Load Team"}
           </button>
