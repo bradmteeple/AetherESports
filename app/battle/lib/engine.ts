@@ -98,6 +98,11 @@ function statBlockFrom(p: any): StatBlock | undefined {
   };
 }
 
+export interface CustomTeam {
+  aiTeam: string; // packed team the Rival AI will use
+  doubles: boolean;
+}
+
 export class BattleController {
   private streams: ReturnType<typeof BattleStreams.getPlayerStreams>;
   private destroyed = false;
@@ -110,14 +115,21 @@ export class BattleController {
   private maxTurn = 0;
 
   private level: number;
+  private custom?: CustomTeam;
 
-  constructor(format: FormatKey, level: number, onUpdate: (s: BattleSnapshot) => void) {
+  constructor(
+    format: FormatKey,
+    level: number,
+    onUpdate: (s: BattleSnapshot) => void,
+    custom?: CustomTeam
+  ) {
     this.def = FORMATS[format];
     this.level = level;
     this.onUpdate = onUpdate;
+    this.custom = custom;
     this.snapshot = {
       format,
-      gametype: this.def.gametype,
+      gametype: custom ? (custom.doubles ? "doubles" : "singles") : this.def.gametype,
       requestId: 0,
       teamStats: {},
       aiReasons: [],
@@ -161,7 +173,24 @@ export class BattleController {
     this.snapshot.log.push(line);
   }
 
+  // Effective engine format: a custom AI team plays under a no-validation Custom Game.
+  // Team Preview is disabled so the battle starts straight away with default lead order.
+  private engineFormatId(): string {
+    if (this.custom) {
+      return this.custom.doubles
+        ? "gen9doublescustomgame@@@!Team Preview"
+        : "gen9customgame@@@!Team Preview";
+    }
+    return this.def.engineFormat;
+  }
+
   private teamsFor(): { p1: string; p2: string; p1Sets: any[]; p2Sets: any[] } {
+    if (this.custom) {
+      // Rival AI (p2) uses the pasted team; the human (p1) gets an auto team.
+      const p1Sets = Teams.generate("gen9randombattle");
+      const p2Sets = Teams.unpack(this.custom.aiTeam) ?? [];
+      return { p1: Teams.pack(p1Sets), p2: this.custom.aiTeam, p1Sets, p2Sets };
+    }
     if (this.def.packedTeams?.length) {
       const pool = this.def.packedTeams;
       const i = Math.floor(Math.random() * pool.length);
@@ -214,7 +243,7 @@ export class BattleController {
     void ai.start();
     void this.readPlayerStream();
 
-    const spec = { formatid: this.def.engineFormat };
+    const spec = { formatid: this.engineFormatId() };
     const p1spec = { name: "You", team: p1 };
     const p2spec = { name: "Rival AI", team: p2 };
 
