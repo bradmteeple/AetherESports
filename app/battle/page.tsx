@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { BattleSnapshot, MoveOption, SwitchOption } from "./lib/engine";
+import type { BattleSnapshot, CustomTeam, MoveOption, SwitchOption } from "./lib/engine";
 import type { ActiveMon, BoardState, StatBlock } from "./lib/protocol";
 import { FORMAT_LIST, FORMATS, type FormatKey } from "./lib/formats";
 import { needsTarget, targetOptions } from "./lib/choices";
@@ -16,6 +16,9 @@ export default function BattlePage() {
   const [battleKey, setBattleKey] = useState(0);
   const [started, setStarted] = useState(false);
   const [whyOpen, setWhyOpen] = useState(false);
+  const [customTeam, setCustomTeam] = useState<{ packed: string; species: string[] } | null>(null);
+  const [customDoubles, setCustomDoubles] = useState(false);
+  const [runningCustom, setRunningCustom] = useState<CustomTeam | undefined>(undefined);
   const logEndRef = useRef<HTMLDivElement | null>(null);
   const chooseRef = useRef<((choice: string) => void) | null>(null);
 
@@ -28,7 +31,7 @@ export default function BattlePage() {
     (async () => {
       const { BattleController } = await import("./lib/engine");
       if (cancelled) return;
-      controller = new BattleController(runningFormat, runningLevel, (s) => setSnapshot(s));
+      controller = new BattleController(runningFormat, runningLevel, (s) => setSnapshot(s), runningCustom);
       chooseRef.current = (c) => controller!.choose(c);
     })();
 
@@ -37,7 +40,7 @@ export default function BattlePage() {
       controller?.destroy();
       chooseRef.current = null;
     };
-  }, [battleKey, runningFormat, runningLevel, started]);
+  }, [battleKey, runningFormat, runningLevel, started, runningCustom]);
 
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -46,14 +49,22 @@ export default function BattlePage() {
   const startBattle = useCallback(() => {
     setRunningFormat(selectedFormat);
     setRunningLevel(selectedLevel);
+    setRunningCustom(customTeam ? { aiTeam: customTeam.packed, doubles: customDoubles } : undefined);
     setStarted(true);
     setBattleKey((k) => k + 1);
-  }, [selectedFormat, selectedLevel]);
+  }, [selectedFormat, selectedLevel, customTeam, customDoubles]);
 
   const choose = useCallback((c: string) => chooseRef.current?.(c), []);
 
   return (
-    <>
+    <div className="battle-page">
+      <CustomTeamPanel
+        team={customTeam}
+        doubles={customDoubles}
+        onDoubles={setCustomDoubles}
+        onLoad={setCustomTeam}
+        onClear={() => setCustomTeam(null)}
+      />
       <h1 className="page-title">Battle</h1>
       <p className="page-text">
         Powered by the real Pokémon Showdown battle engine. Held items are shown for both teams.
@@ -142,7 +153,90 @@ export default function BattlePage() {
           </div>
         </div>
       )}
-    </>
+    </div>
+  );
+}
+
+function CustomTeamPanel({
+  team,
+  doubles,
+  onDoubles,
+  onLoad,
+  onClear,
+}: {
+  team: { packed: string; species: string[] } | null;
+  doubles: boolean;
+  onDoubles: (b: boolean) => void;
+  onLoad: (t: { packed: string; species: string[] }) => void;
+  onClear: () => void;
+}) {
+  const [text, setText] = useState("");
+  const [status, setStatus] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = async () => {
+    const input = text.trim();
+    if (!input) return;
+    setBusy(true);
+    setStatus(null);
+    try {
+      const { looksLikeUrl, fetchPokepaste, importTeam } = await import("./lib/pokepaste");
+      const raw = looksLikeUrl(input) ? await fetchPokepaste(input) : input;
+      const loaded = importTeam(raw);
+      if (!loaded) {
+        setStatus("Couldn't read a team from that — check the paste or export text.");
+      } else {
+        onLoad(loaded);
+        setText("");
+      }
+    } catch (e) {
+      setStatus(e instanceof Error ? e.message : "Failed to load that team.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <aside className="custom-team-panel">
+      <div className="ct-title">Rival AI Team</div>
+      {team ? (
+        <>
+          <p className="ct-note">
+            Using your custom team ({team.species.length}) in a {doubles ? "Doubles" : "Singles"} Custom
+            Game.
+          </p>
+          <ul className="ct-list">
+            {team.species.map((s, i) => (
+              <li key={i}>
+                <Thumb name={s} />
+                <span>{s}</span>
+              </li>
+            ))}
+          </ul>
+          <button className="battle-btn battle-btn--ghost" onClick={onClear}>
+            Clear team
+          </button>
+        </>
+      ) : (
+        <>
+          <textarea
+            className="ct-input"
+            rows={3}
+            placeholder="Paste a PokePaste URL — or the team's export text"
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+          />
+          <label className="ct-doubles">
+            <input type="checkbox" checked={doubles} onChange={(e) => onDoubles(e.target.checked)} />{" "}
+            Doubles
+          </label>
+          <button className="battle-btn" disabled={busy || !text.trim()} onClick={load}>
+            {busy ? "Loading…" : "Load Team"}
+          </button>
+          {status && <p className="ct-error">{status}</p>}
+        </>
+      )}
+    </aside>
   );
 }
 

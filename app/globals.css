@@ -872,6 +872,81 @@ body {
   color: #9fb6d6;
 }
 
+/* ---------- Custom AI team (PokePaste) panel — right-gutter overlay ---------- */
+.battle-page {
+  position: relative;
+}
+
+.custom-team-panel {
+  position: absolute;
+  top: 0;
+  right: min(0.5rem, calc((900px - 100vw) / 2 + 0.25rem));
+  width: 220px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  padding: 0.85rem 0.9rem;
+  background: rgba(10, 15, 36, 0.7);
+  border: 1px solid rgba(0, 224, 255, 0.3);
+  border-radius: 12px;
+}
+
+.ct-title {
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #8fd6ff;
+}
+
+.ct-note {
+  font-size: 0.78rem;
+  color: #9fb6d6;
+  line-height: 1.35;
+}
+
+.ct-input {
+  width: 100%;
+  resize: vertical;
+  padding: 0.5rem 0.6rem;
+  border-radius: 8px;
+  border: 1px solid rgba(123, 91, 255, 0.4);
+  background: rgba(5, 6, 15, 0.6);
+  color: #f5f7ff;
+  font: inherit;
+  font-size: 0.8rem;
+}
+
+.ct-doubles {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.82rem;
+  color: #cdd5ff;
+  cursor: pointer;
+}
+
+.ct-error {
+  font-size: 0.76rem;
+  color: #ff8ba7;
+  line-height: 1.35;
+}
+
+.ct-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.ct-list li {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+  color: #eef1ff;
+}
+
 @media (max-width: 720px) {
   /* Small screens have no gutter — put the panel back in flow, stacked above the
      battle (pushes down, never right) with no overlap. */
@@ -881,5 +956,10 @@ body {
   }
   .ai-panel--open {
     width: 100%;
+  }
+  .custom-team-panel {
+    position: static;
+    width: 100%;
+    margin-bottom: 1rem;
   }
 }
