@@ -17,21 +17,23 @@ export default function BattlePage() {
   const [started, setStarted] = useState(false);
   const [whyOpen, setWhyOpen] = useState(false);
   const [customTeam, setCustomTeam] = useState<{ packed: string; species: string[] } | null>(null);
+  const [playerTeam, setPlayerTeam] = useState<{ packed: string; species: string[] } | null>(null);
   const [runningCustom, setRunningCustom] = useState<CustomTeam | undefined>(undefined);
   const logEndRef = useRef<HTMLDivElement | null>(null);
   const chooseRef = useRef<((choice: string) => void) | null>(null);
 
-  // The Rival AI team is always assumed to be for the currently selected format,
-  // so its singles/doubles nature follows that format rather than a manual toggle.
+  // Both custom teams are always assumed to be for the currently selected format,
+  // so their singles/doubles nature follows that format rather than a manual toggle.
   const selectedDoubles = FORMATS[selectedFormat].gametype === "doubles";
 
-  // Switching formats clears any loaded Rival AI team — a team pasted for one
+  // Switching formats clears any loaded custom team — a team pasted for one
   // format shouldn't silently carry over into a different one.
   const selectFormat = useCallback(
     (key: FormatKey) => {
       if (key === selectedFormat) return;
       setSelectedFormat(key);
       setCustomTeam(null);
+      setPlayerTeam(null);
     },
     [selectedFormat]
   );
@@ -63,22 +65,43 @@ export default function BattlePage() {
   const startBattle = useCallback(() => {
     setRunningFormat(selectedFormat);
     setRunningLevel(selectedLevel);
-    setRunningCustom(customTeam ? { aiTeam: customTeam.packed, doubles: selectedDoubles } : undefined);
+    setRunningCustom(
+      customTeam || playerTeam
+        ? {
+            aiTeam: customTeam?.packed,
+            playerTeam: playerTeam?.packed,
+            doubles: selectedDoubles,
+          }
+        : undefined
+    );
     setStarted(true);
     setBattleKey((k) => k + 1);
-  }, [selectedFormat, selectedLevel, customTeam, selectedDoubles]);
+  }, [selectedFormat, selectedLevel, customTeam, playerTeam, selectedDoubles]);
 
   const choose = useCallback((c: string) => chooseRef.current?.(c), []);
 
   return (
     <div className="battle-page">
-      <CustomTeamPanel
-        team={customTeam}
-        formatLabel={FORMATS[selectedFormat].label}
-        doubles={selectedDoubles}
-        onLoad={setCustomTeam}
-        onClear={() => setCustomTeam(null)}
-      />
+      <div className="custom-team-stack">
+        <CustomTeamPanel
+          title="Your Team"
+          owner="You"
+          team={playerTeam}
+          formatLabel={FORMATS[selectedFormat].label}
+          doubles={selectedDoubles}
+          onLoad={setPlayerTeam}
+          onClear={() => setPlayerTeam(null)}
+        />
+        <CustomTeamPanel
+          title="Rival AI Team"
+          owner="The Rival AI"
+          team={customTeam}
+          formatLabel={FORMATS[selectedFormat].label}
+          doubles={selectedDoubles}
+          onLoad={setCustomTeam}
+          onClear={() => setCustomTeam(null)}
+        />
+      </div>
       <h1 className="page-title">Battle</h1>
       <p className="page-text">
         Powered by the real Pokémon Showdown battle engine. Held items are shown for both teams.
@@ -172,12 +195,16 @@ export default function BattlePage() {
 }
 
 function CustomTeamPanel({
+  title,
+  owner,
   team,
   formatLabel,
   doubles,
   onLoad,
   onClear,
 }: {
+  title: string;
+  owner: string; // who plays this team, e.g. "You" or "The Rival AI"
   team: { packed: string; species: string[] } | null;
   formatLabel: string;
   doubles: boolean;
@@ -212,11 +239,11 @@ function CustomTeamPanel({
 
   return (
     <aside className="custom-team-panel">
-      <div className="ct-title">Rival AI Team</div>
+      <div className="ct-title">{title}</div>
       {team ? (
         <>
           <p className="ct-note">
-            Using your custom team ({team.species.length}) as the Rival AI for {formatLabel} (
+            {owner} will use this custom team ({team.species.length}) for {formatLabel} (
             {doubles ? "Doubles" : "Singles"}).
           </p>
           <ul className="ct-list">
@@ -241,8 +268,8 @@ function CustomTeamPanel({
             onChange={(e) => setText(e.target.value)}
           />
           <p className="ct-note">
-            This team will play as the Rival AI for {formatLabel} ({doubles ? "Doubles" : "Singles"}).
-            Changing the format clears it.
+            {owner} will use this team for {formatLabel} ({doubles ? "Doubles" : "Singles"}). Changing
+            the format clears it.
           </p>
           <button className="battle-btn" disabled={busy || !text.trim()} onClick={load}>
             {busy ? "Loading…" : "Load Team"}

@@ -99,7 +99,8 @@ function statBlockFrom(p: any): StatBlock | undefined {
 }
 
 export interface CustomTeam {
-  aiTeam: string; // packed team the Rival AI will use
+  aiTeam?: string; // packed team the Rival AI (p2) uses, if one was pasted
+  playerTeam?: string; // packed team the human (p1) uses, if one was pasted
   doubles: boolean;
 }
 
@@ -186,10 +187,16 @@ export class BattleController {
 
   private teamsFor(): { p1: string; p2: string; p1Sets: any[]; p2Sets: any[] } {
     if (this.custom) {
-      // Rival AI (p2) uses the pasted team; the human (p1) gets an auto team.
-      const p1Sets = Teams.generate("gen9randombattle");
-      const p2Sets = Teams.unpack(this.custom.aiTeam) ?? [];
-      return { p1: Teams.pack(p1Sets), p2: this.custom.aiTeam, p1Sets, p2Sets };
+      // Either side may bring a pasted team; a side without one gets an auto team.
+      const p1Sets = this.custom.playerTeam
+        ? Teams.unpack(this.custom.playerTeam) ?? []
+        : Teams.generate("gen9randombattle");
+      const p2Sets = this.custom.aiTeam
+        ? Teams.unpack(this.custom.aiTeam) ?? []
+        : Teams.generate("gen9randombattle");
+      const p1 = this.custom.playerTeam ?? Teams.pack(p1Sets);
+      const p2 = this.custom.aiTeam ?? Teams.pack(p2Sets);
+      return { p1, p2, p1Sets, p2Sets };
     }
     if (this.def.packedTeams?.length) {
       const pool = this.def.packedTeams;
