@@ -100,6 +100,18 @@ export function describeLine(line: string, board: BoardState): string | null {
       const { side, name } = setActive(parts[1], parts[3]);
       return `${who(side)} ${name} was revealed!`;
     }
+    case "swap": {
+      // Ally Switch (and similar) physically swap two active slots — follow it so each mon keeps
+      // its true field position instead of desyncing from later slot-addressed lines.
+      const { side, slot } = parseIdent(parts[1]);
+      const target = parseInt(parts[2], 10);
+      if (!Number.isNaN(target) && target !== slot && board[side][target] !== undefined) {
+        const tmp = board[side][slot];
+        board[side][slot] = board[side][target];
+        board[side][target] = tmp;
+      }
+      return null;
+    }
     case "detailschange":
     case "-formechange": {
       // Mega Evolution / forme change: rename the on-field mon so its card + sprite update.

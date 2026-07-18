@@ -89,6 +89,14 @@ export function buildReplayFrames(lines: string[]): ReplayFrame[] {
       const name = baseName(parts[3] || "");
       slotName[side][slot] = name;
       if (name && !order[side].includes(name)) order[side].push(name);
+    } else if (line.startsWith("|swap|")) {
+      // Keep slot→species in step with a position swap so a later faint is attributed correctly.
+      const parts = line.split("|");
+      const { side, slot } = sideSlot(parts[2]);
+      const target = parseInt(parts[3], 10);
+      if (!Number.isNaN(target) && target !== slot) {
+        [slotName[side][slot], slotName[side][target]] = [slotName[side][target], slotName[side][slot]];
+      }
     } else if (line.startsWith("|faint|")) {
       const { side, slot } = sideSlot(line.split("|")[2]);
       const name = slotName[side][slot];

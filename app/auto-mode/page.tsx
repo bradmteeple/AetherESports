@@ -431,9 +431,13 @@ function ReplayField({
   label: string;
   foe?: boolean;
 }) {
+  // Each card is pinned to its battle slot (a = 0, b = 1), so a Pokémon never changes screen
+  // position until it switches out or faints. The foe's row is mirrored (slot b, then a) to match
+  // the standard Showdown doubles layout, where the opponent's slot-a sits on the right.
+  const order = foe ? [1, 0] : [0, 1];
   return (
     <div className="field-side field-side--doubles">
-      {[0, 1].map((i) => (
+      {order.map((i) => (
         <ReplayMonCard key={i} mon={board[side][i]} sideLabel={label} foe={foe} />
       ))}
     </div>
