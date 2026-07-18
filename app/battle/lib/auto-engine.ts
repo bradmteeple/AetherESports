@@ -10,7 +10,7 @@
 // game gets a fresh BattleStream (also unseeded), so no two games play out identically. The
 // base RandomPlayerAI picks its Team Preview with "default" (always the same four), so we
 // override chooseTeamPreview to bring a random selection — and record which four, so we can rank
-// the selections by how often they won.
+// the selections by their win rate.
 
 import "./node-shim"; // must precede any @pkmn import — defines Node globals for the browser
 import { BattleStreams, RandomPlayerAI } from "@pkmn/sim";
@@ -49,7 +49,7 @@ const P2_NAME = "Red";
 
 // A random-play AI that also brings a RANDOM Team Preview selection (rather than the base
 // class's fixed "default"), so the selection varies game to game — and records which four it
-// brought (sorted species combo) so the controller can rank selections by wins.
+// brought (sorted species combo) so the controller can rank selections by win rate.
 class LeadRandomAI extends RandomPlayerAI {
   selectedCombo: string | null = null;
 
@@ -78,15 +78,17 @@ function cleanName(details: string): string {
   return (details || "").split(",")[0].trim();
 }
 
-// All selections ranked by wins (tiebreak: higher win rate, then name). The UI shows the top 3;
-// the full list is kept so a Stop → Start resume doesn't lose the rest.
-function sortByWins(map: Map<string, { games: number; wins: number }>): ComboStat[] {
+// All selections ranked by win rate (tiebreak: more wins — i.e. larger sample — then name). The
+// UI shows the top 3; the full list is kept so a Stop → Start resume doesn't lose the rest. The
+// tab runs thousands of games, so every selection accumulates a large sample and rates stabilize.
+function sortByWinRate(map: Map<string, { games: number; wins: number }>): ComboStat[] {
+  const rate = (c: { games: number; wins: number }) => (c.games ? c.wins / c.games : 0);
   return Array.from(map.entries())
     .map(([combo, { games, wins }]) => ({ combo, games, wins }))
     .sort(
       (x, y) =>
+        rate(y) - rate(x) ||
         y.wins - x.wins ||
-        y.wins / y.games - x.wins / x.games ||
         x.combo.localeCompare(y.combo)
     );
 }
@@ -253,8 +255,8 @@ export class AutoBattleController {
   private snapshot(): Tally {
     return {
       ...this.counts,
-      topBlue: sortByWins(this.comboBlue),
-      topRed: sortByWins(this.comboRed),
+      topBlue: sortByWinRate(this.comboBlue),
+      topRed: sortByWinRate(this.comboRed),
     };
   }
 

@@ -173,7 +173,8 @@ export default function AutoMode() {
 
       <p className="auto-note">
         Each side brings a random 4 of its 6 every game; the columns show that side&apos;s top 3
-        selections by wins (with win rate). Changing a team starts a new matchup and resets the tally.
+        selections by win rate (with wins/games). Changing a team starts a new matchup and resets
+        the tally.
       </p>
     </div>
   );
@@ -200,8 +201,8 @@ function WinColumn({
             <li key={c.combo} className="auto-lead-row">
               <span className="auto-lead-combo">{c.combo}</span>
               <span className="auto-lead-count">
-                {c.wins.toLocaleString()} {c.wins === 1 ? "win" : "wins"}
-                {c.games ? ` · ${Math.round((c.wins / c.games) * 100)}%` : ""}
+                {c.games ? `${Math.round((c.wins / c.games) * 100)}%` : "—"}
+                {c.games ? ` · ${c.wins.toLocaleString()}/${c.games.toLocaleString()}` : ""}
               </span>
             </li>
           ))}
