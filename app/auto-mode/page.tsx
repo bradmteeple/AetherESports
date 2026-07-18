@@ -25,61 +25,84 @@ const DEFAULT_RED = (REG_MB_TEAMS[1] ?? REG_MB_TEAMS[0])?.id ?? "";
 
 export default function AutoMode() {
   const [running, setRunning] = useState(false);
-  const [ready, setReady] = useState(false);
+  const [loading, setLoading] = useState(false); // engine chunk loading on the first Start
   const [tally, setTally] = useState<Tally>(ZERO);
   const [blueId, setBlueId] = useState(DEFAULT_BLUE);
   const [redId, setRedId] = useState(DEFAULT_RED);
   const [planUrl, setPlanUrl] = useState<string | null>(null);
   const controllerRef = useRef<AutoBattleController | null>(null);
+  const runningRef = useRef(false); // mirrors `running` for async guards
+  const aliveRef = useRef(true);
 
-  // One controller per matchup. It stays alive across Stop/Start so power and learning persist
-  // (they must only ever ramp up); it's rebuilt only when a team changes or on unmount.
+  const setRun = useCallback((v: boolean) => {
+    runningRef.current = v;
+    setRunning(v);
+  }, []);
+
+  // Track mount so an in-flight engine import can bail if we've unmounted.
   useEffect(() => {
-    let cancelled = false;
-    setReady(false);
-    setRunning(false);
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+    };
+  }, []);
+
+  // The controller stays alive across Stop/Start so power/learning persist (they must only ever
+  // ramp up). Changing a team (or unmounting) tears it down; a fresh one is built on next Start.
+  useEffect(() => {
+    setRun(false);
     setTally(ZERO);
     setPlanUrl(null);
-
-    (async () => {
-      const { AutoBattleController } = await import("../battle/lib/auto-engine");
-      if (cancelled) return;
-      const p1Team = teamById(blueId)?.packed;
-      const p2Team = teamById(redId)?.packed;
-      if (!p1Team || !p2Team) return;
-      const controller = new AutoBattleController({
-        p1Team,
-        p2Team,
-        onUpdate: (t) => {
-          if (!cancelled) setTally(t);
-        },
-      });
-      controllerRef.current = controller;
-      setReady(true);
-    })();
-
+    setLoading(false);
     return () => {
-      cancelled = true;
       controllerRef.current?.destroy();
       controllerRef.current = null;
     };
-  }, [blueId, redId]);
+  }, [blueId, redId, setRun]);
 
-  const start = useCallback(() => {
+  // Start creates the engine lazily on click (the @pkmn chunk is large — never gate the button
+  // behind it). The button flips to running immediately; the loop begins once the chunk loads.
+  const start = useCallback(async () => {
     setPlanUrl(null);
-    controllerRef.current?.start();
-    setRunning(true);
-  }, []);
+    setRun(true);
+    try {
+      if (!controllerRef.current) {
+        setLoading(true);
+        const { AutoBattleController } = await import("../battle/lib/auto-engine");
+        if (!aliveRef.current) return;
+        if (!controllerRef.current) {
+          const p1Team = teamById(blueId)?.packed;
+          const p2Team = teamById(redId)?.packed;
+          if (!p1Team || !p2Team) {
+            setRun(false);
+            return;
+          }
+          controllerRef.current = new AutoBattleController({
+            p1Team,
+            p2Team,
+            onUpdate: (t) => setTally(t),
+          });
+        }
+      }
+      if (runningRef.current) controllerRef.current.start(); // user may have hit Stop while loading
+    } catch {
+      setRun(false);
+    } finally {
+      setLoading(false);
+    }
+  }, [blueId, redId, setRun]);
+
   const stop = useCallback(() => {
     const c = controllerRef.current;
     c?.stop();
-    setRunning(false);
+    setRun(false);
     // Generate Blue's game plan from the run so far and expose the flowchart link.
     if (c) {
       const plan = c.bluePlan(teamById(blueId)?.name ?? "Blue", teamById(redId)?.name ?? "Red");
       setPlanUrl(plan.games >= MIN_PLAN_GAMES ? `/auto-mode/plan?d=${encodePlan(plan)}` : null);
     }
-  }, [blueId, redId]);
+  }, [blueId, redId, setRun]);
+
   const reset = useCallback(() => {
     setPlanUrl(null);
     controllerRef.current?.reset();
@@ -139,7 +162,11 @@ export default function AutoMode() {
       </div>
 
       <div className="auto-controls">
-        <button className="battle-btn auto-btn--start" onClick={start} disabled={running || !ready}>
+        <button
+          className="battle-btn auto-btn--start"
+          onClick={start}
+          disabled={running || !blueId || !redId}
+        >
           ▶ Start
         </button>
         <button className="battle-btn auto-btn--stop" onClick={stop} disabled={!running}>
@@ -153,7 +180,7 @@ export default function AutoMode() {
           Reset
         </button>
         <span className={"auto-status" + (running ? " auto-status--on" : "")}>
-          {running ? "running…" : tally.games ? "stopped" : "idle"}
+          {running ? (loading ? "starting…" : "running…") : tally.games ? "stopped" : "idle"}
         </span>
       </div>
 
