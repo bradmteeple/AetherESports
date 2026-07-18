@@ -4,66 +4,70 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { AutoBattleController, ComboStat, Tally } from "../battle/lib/auto-engine";
 import { REG_MB_TEAMS, teamById } from "../battle/lib/reg-mb-teams";
 
-const ZERO: Tally = { blue: 0, red: 0, ties: 0, games: 0, topBlue: [], topRed: [] };
+const ZERO: Tally = {
+  blue: 0,
+  red: 0,
+  ties: 0,
+  games: 0,
+  powerBlue: 0,
+  powerRed: 0,
+  topBlue: [],
+  topRed: [],
+};
 
 const DEFAULT_BLUE = REG_MB_TEAMS[0]?.id ?? "";
 const DEFAULT_RED = (REG_MB_TEAMS[1] ?? REG_MB_TEAMS[0])?.id ?? "";
 
 export default function AutoMode() {
   const [running, setRunning] = useState(false);
+  const [ready, setReady] = useState(false);
   const [tally, setTally] = useState<Tally>(ZERO);
   const [blueId, setBlueId] = useState(DEFAULT_BLUE);
   const [redId, setRedId] = useState(DEFAULT_RED);
+  const controllerRef = useRef<AutoBattleController | null>(null);
 
-  // Latest values available to the run effect without being deps (selectors are locked while
-  // running, so these can't change mid-run; the effect only re-keys on `running`).
-  const tallyRef = useRef<Tally>(ZERO);
-  tallyRef.current = tally;
-  const blueRef = useRef(blueId);
-  blueRef.current = blueId;
-  const redRef = useRef(redId);
-  redRef.current = redId;
-
+  // One controller per matchup. It stays alive across Stop/Start so power and learning persist
+  // (they must only ever ramp up); it's rebuilt only when a team changes or on unmount.
   useEffect(() => {
-    if (!running) return;
     let cancelled = false;
-    let controller: AutoBattleController | null = null;
+    setReady(false);
+    setRunning(false);
+    setTally(ZERO);
 
     (async () => {
       const { AutoBattleController } = await import("../battle/lib/auto-engine");
       if (cancelled) return;
-      const p1Team = teamById(blueRef.current)?.packed;
-      const p2Team = teamById(redRef.current)?.packed;
+      const p1Team = teamById(blueId)?.packed;
+      const p2Team = teamById(redId)?.packed;
       if (!p1Team || !p2Team) return;
-      controller = new AutoBattleController({
+      const controller = new AutoBattleController({
         p1Team,
         p2Team,
-        initial: tallyRef.current,
         onUpdate: (t) => {
           if (!cancelled) setTally(t);
         },
       });
-      controller.start();
+      controllerRef.current = controller;
+      setReady(true);
     })();
 
     return () => {
       cancelled = true;
-      controller?.destroy();
+      controllerRef.current?.destroy();
+      controllerRef.current = null;
     };
-  }, [running]);
+  }, [blueId, redId]);
 
-  const start = useCallback(() => setRunning(true), []);
-  const stop = useCallback(() => setRunning(false), []);
-  const reset = useCallback(() => setTally(ZERO), []);
-
-  // Changing a team starts a fresh matchup, so the running tally no longer applies.
-  const pickBlue = useCallback((id: string) => {
-    setBlueId(id);
-    setTally(ZERO);
+  const start = useCallback(() => {
+    controllerRef.current?.start();
+    setRunning(true);
   }, []);
-  const pickRed = useCallback((id: string) => {
-    setRedId(id);
-    setTally(ZERO);
+  const stop = useCallback(() => {
+    controllerRef.current?.stop();
+    setRunning(false);
+  }, []);
+  const reset = useCallback(() => {
+    controllerRef.current?.reset();
   }, []);
 
   const blueName = teamById(blueId)?.name ?? "—";
@@ -71,15 +75,18 @@ export default function AutoMode() {
   const decided = tally.blue + tally.red;
   const bluePct = decided ? Math.round((tally.blue / decided) * 100) : 0;
   const redPct = decided ? 100 - bluePct : 0;
+  const bluePow = Math.round(tally.powerBlue * 100);
+  const redPow = Math.round(tally.powerRed * 100);
 
   return (
     <div className="auto-page">
       <h1 className="page-title">Auto Battle</h1>
       <p className="page-text">
-        Pick a team for each side, then press Start. Two random-play AIs battle those teams in
-        VGC 2026 Reg M-B, back-to-back at full speed — there&apos;s nothing to watch, it just
-        runs and tallies results until you press Stop. Below the score, each side&apos;s top 3
-        winning 4-of-6 selections are labeled. Any team can play any team (mirrors included).
+        Two AIs battle in VGC 2026 Reg M-B, back-to-back at full speed. Game one is fully random;
+        after that they teach each other — the loser of each game ramps up hard and the winner a
+        little, so both only ever grow stronger (no ceiling), learning to counter the
+        opponent&apos;s threats. There&apos;s nothing to watch; it just runs and tallies, and below
+        the score each side&apos;s top 3 winning 4-of-6 selections are labeled.
       </p>
 
       <div className="auto-teampick">
@@ -89,7 +96,7 @@ export default function AutoMode() {
             className="auto-team-select"
             value={blueId}
             disabled={running}
-            onChange={(e) => pickBlue(e.target.value)}
+            onChange={(e) => setBlueId(e.target.value)}
           >
             {REG_MB_TEAMS.map((t) => (
               <option key={t.id} value={t.id}>
@@ -105,7 +112,7 @@ export default function AutoMode() {
             className="auto-team-select"
             value={redId}
             disabled={running}
-            onChange={(e) => pickRed(e.target.value)}
+            onChange={(e) => setRedId(e.target.value)}
           >
             {REG_MB_TEAMS.map((t) => (
               <option key={t.id} value={t.id}>
@@ -117,18 +124,10 @@ export default function AutoMode() {
       </div>
 
       <div className="auto-controls">
-        <button
-          className="battle-btn auto-btn--start"
-          onClick={start}
-          disabled={running || !blueId || !redId}
-        >
+        <button className="battle-btn auto-btn--start" onClick={start} disabled={running || !ready}>
           ▶ Start
         </button>
-        <button
-          className="battle-btn auto-btn--stop"
-          onClick={stop}
-          disabled={!running}
-        >
+        <button className="battle-btn auto-btn--stop" onClick={stop} disabled={!running}>
           ■ Stop
         </button>
         <button
@@ -143,14 +142,19 @@ export default function AutoMode() {
         </span>
       </div>
 
+      <div className="auto-power">
+        <PowerBar label={`Blue power · ${blueName}`} accent="blue" pct={bluePow} />
+        <PowerBar label={`Red power · ${redName}`} accent="red" pct={redPow} />
+      </div>
+
       <div className="auto-scoreboard">
         <div className="auto-stat auto-stat--blue">
-          <span className="auto-stat-label">Blue · {blueName}</span>
+          <span className="auto-stat-label">Blue wins</span>
           <span className="auto-stat-value">{tally.blue.toLocaleString()}</span>
           <span className="auto-stat-sub">{bluePct}% of decided</span>
         </div>
         <div className="auto-stat auto-stat--red">
-          <span className="auto-stat-label">Red · {redName}</span>
+          <span className="auto-stat-label">Red wins</span>
           <span className="auto-stat-value">{tally.red.toLocaleString()}</span>
           <span className="auto-stat-sub">{redPct}% of decided</span>
         </div>
@@ -174,8 +178,22 @@ export default function AutoMode() {
       <p className="auto-note">
         Each side brings a random 4 of its 6 every game; the columns show that side&apos;s top 3
         selections by win rate (with wins/games), among picks with at least 500 games so the rates
-        are meaningful. Changing a team starts a new matchup and resets the tally.
+        are meaningful. Changing a team or pressing Reset starts a new arms race (power and learning
+        back to zero).
       </p>
+    </div>
+  );
+}
+
+function PowerBar({ label, accent, pct }: { label: string; accent: "blue" | "red"; pct: number }) {
+  return (
+    <div className={"auto-power-row auto-power-row--" + accent}>
+      <span className="auto-power-label">{label}</span>
+      <div className="auto-power-track">
+        {/* Bar fills to 100% once fully powered; the % label keeps climbing past it. */}
+        <div className="auto-power-fill" style={{ width: `${Math.min(100, pct)}%` }} />
+      </div>
+      <span className="auto-power-pct">{pct}%</span>
     </div>
   );
 }

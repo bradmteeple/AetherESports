@@ -69,12 +69,15 @@ export class ReasoningAI extends RandomPlayerAI {
   protected reasons: string[] = [];
   protected activeSp: Record<Side, (string | null)[]> = { p1: [null, null], p2: [null, null] };
   protected readonly mistakeRate: number;
+  // Which side this AI plays. Defaults to p2 (the Battle tab's Rival AI); the Auto Battle
+  // self-play runner sets it per side so "my" species and "foes" resolve correctly.
+  protected readonly side: Side;
   private readonly report: (turn: number, reasons: string[]) => void;
 
   constructor(
     playerStream: any,
     report: (turn: number, reasons: string[]) => void,
-    opts: { mistakeRate?: number; seed?: any } = {}
+    opts: { mistakeRate?: number; seed?: any; side?: Side } = {}
   ) {
     // mega: 1 => Mega Evolve whenever a held Mega Stone allows it (base RandomPlayerAI appends
     // " mega" to our chosen move in receiveRequest). Gen 9 has no dynamax/ultra, so this only
@@ -82,6 +85,11 @@ export class ReasoningAI extends RandomPlayerAI {
     super(playerStream, { move: 1.0, mega: 1, seed: opts.seed ?? null });
     this.report = report;
     this.mistakeRate = opts.mistakeRate ?? 0;
+    this.side = opts.side ?? "p2";
+  }
+
+  protected get foeSide(): Side {
+    return this.side === "p1" ? "p2" : "p1";
   }
 
   override receiveLine(line: string) {
@@ -125,7 +133,7 @@ export class ReasoningAI extends RandomPlayerAI {
 
   protected foes(): { slot: number; species: string; types: string[] }[] {
     const out: { slot: number; species: string; types: string[] }[] = [];
-    this.activeSp.p1.forEach((sp, i) => {
+    this.activeSp[this.foeSide].forEach((sp, i) => {
       if (!sp) return;
       const s = Dex.species.get(sp);
       out.push({ slot: i, species: sp, types: s.types ?? [] });
@@ -196,7 +204,7 @@ export class ReasoningAI extends RandomPlayerAI {
   override chooseMove(active: any, moves: { choice: string; move: any }[]): string {
     const slot = this.slotCursor++;
     const doubles = this.reqActiveLen > 1;
-    const mySpecies = this.activeSp.p2[slot] || "";
+    const mySpecies = this.activeSp[this.side][slot] || "";
     const myTypes = mySpecies ? Dex.species.get(mySpecies).types ?? [] : [];
     const ctx: MoveCtx = { mySpecies, myTypes, foes: this.foes(), doubles };
 
@@ -274,8 +282,8 @@ export class AdaptiveAI extends ReasoningAI {
     const cmd = parts[1];
     if (cmd === "move") {
       const { side, slot } = this.pos(parts[2]);
-      if (side === "p1") {
-        const sp = this.activeSp.p1[slot] || "";
+      if (side === this.foeSide) {
+        const sp = this.activeSp[this.foeSide][slot] || "";
         const mv = toID(parts[3] || "");
         if (sp && mv) {
           const id = toID(sp);
