@@ -69,15 +69,16 @@ export const FORMATS: Record<FormatKey, FormatDef> = {
     key: "vgcregmb",
     label: "VGC 2026 Reg M-B",
     // Reg I + hard ban on all Restricted Legendaries (Reg I allowed two), the Champions 66-EV
-    // budget, and Mega Evolution re-enabled by unbanning the Mega Stones + formes the teams use.
+    // budget, Terastal Clause (Champions replaces Tera with Mega — no Terastallizing), and Mega
+    // Evolution re-enabled by unbanning the Mega Stones + formes the teams use.
     // No space after commas: the battle engine splits @@@ rules on "," without trimming.
     engineFormat:
-      "gen9vgc2025regi@@@!Limit Two Restricted,-Restricted Legendary,!EV Limit,EV Limit = 66,+Gardevoirite,+Gardevoir-Mega,+Baxcalibrite,+Baxcalibur-Mega,+Swampertite,+Swampert-Mega,+Aerodactylite,+Aerodactyl-Mega,+Charizardite Y,+Charizard-Mega-Y",
+      "gen9vgc2025regi@@@!Limit Two Restricted,-Restricted Legendary,!EV Limit,EV Limit = 66,Terastal Clause,+Gardevoirite,+Gardevoir-Mega,+Baxcalibrite,+Baxcalibur-Mega,+Swampertite,+Swampert-Mega,+Aerodactylite,+Aerodactyl-Mega,+Charizardite Y,+Charizard-Mega-Y",
     gametype: "doubles",
     teamPreview: true,
     teamSize: 4,
     packedTeams: REG_MB_PACKED,
-    note: "Real Reg M-B ruleset: Lv 50 doubles, Open Team Sheets, no Mythicals or Restricted Legendaries, bring 6 pick 4. Champions training — 66 EV points per Pokémon (max 32 in one stat), each adds +1 to that stat (IVs unused). Mega Evolution is enabled: a Pokémon holding its Mega Stone can Mega Evolve once per battle. Champions-only Pokémon aren't in the in-browser Gen 9 engine.",
+    note: "Real Reg M-B ruleset: Lv 50 doubles, Open Team Sheets, no Mythicals or Restricted Legendaries, bring 6 pick 4. Champions training — 66 EV points per Pokémon (max 32 in one stat), each adds +1 to that stat (IVs unused). Mega Evolution replaces Terastallization: a Pokémon holding its Mega Stone can Mega Evolve once per battle, and Tera is disabled. Champions-only Pokémon aren't in the in-browser Gen 9 engine.",
   },
 };
 
