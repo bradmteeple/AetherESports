@@ -173,12 +173,15 @@ export default function AutoMode() {
 
       <p className="auto-note">
         Each side brings a random 4 of its 6 every game; the columns show that side&apos;s top 3
-        selections by win rate (with wins/games). Changing a team starts a new matchup and resets
-        the tally.
+        selections by win rate (with wins/games), among picks with at least 500 games so the rates
+        are meaningful. Changing a team starts a new matchup and resets the tally.
       </p>
     </div>
   );
 }
+
+// A selection needs at least this many games before its win rate is trusted enough to rank.
+const MIN_GAMES = 500;
 
 function WinColumn({
   title,
@@ -189,12 +192,17 @@ function WinColumn({
   accent: "blue" | "red";
   combos: ComboStat[];
 }) {
-  const top = combos.slice(0, 3); // label only the top 3 winning selections
+  // combos arrive sorted by win rate; keep only well-sampled ones, then label the top 3.
+  const top = combos.filter((c) => c.games >= MIN_GAMES).slice(0, 3);
+  const best = combos.reduce((m, c) => Math.max(m, c.games), 0); // progress toward the threshold
   return (
     <div className={"auto-lead-col auto-lead-col--" + accent}>
       <div className="auto-lead-title">{title}</div>
       {top.length === 0 ? (
-        <p className="auto-lead-empty">No games yet.</p>
+        <p className="auto-lead-empty">
+          Gathering data — each pick needs {MIN_GAMES.toLocaleString()}+ games
+          {best ? ` (best so far: ${best.toLocaleString()})` : ""}.
+        </p>
       ) : (
         <ol className="auto-lead-list">
           {top.map((c) => (
