@@ -52,7 +52,8 @@ export default function AutoMode() {
     };
   }, [running]);
 
-  const toggle = useCallback(() => setRunning((r) => !r), []);
+  const start = useCallback(() => setRunning(true), []);
+  const stop = useCallback(() => setRunning(false), []);
   const reset = useCallback(() => setTally(ZERO), []);
 
   // Changing a team starts a fresh matchup, so the running tally no longer applies.
@@ -72,7 +73,7 @@ export default function AutoMode() {
   const redPct = decided ? 100 - bluePct : 0;
 
   return (
-    <>
+    <div className="auto-page">
       <h1 className="page-title">Auto Battle</h1>
       <p className="page-text">
         Pick a team for each side, then press Start. Two random-play AIs battle those teams in
@@ -116,8 +117,19 @@ export default function AutoMode() {
       </div>
 
       <div className="auto-controls">
-        <button className="battle-btn" onClick={toggle} disabled={!blueId || !redId}>
-          {running ? "■ Stop" : "▶ Start"}
+        <button
+          className="battle-btn auto-btn--start"
+          onClick={start}
+          disabled={running || !blueId || !redId}
+        >
+          ▶ Start
+        </button>
+        <button
+          className="battle-btn auto-btn--stop"
+          onClick={stop}
+          disabled={!running}
+        >
+          ■ Stop
         </button>
         <button
           className="battle-btn battle-btn--ghost"
@@ -158,6 +170,6 @@ export default function AutoMode() {
         Every game uses fresh randomness, so no two play out the same. Changing a team starts a
         new matchup and resets the tally.
       </p>
-    </>
+    </div>
   );
 }
