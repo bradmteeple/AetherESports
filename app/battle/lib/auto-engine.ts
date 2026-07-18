@@ -28,21 +28,18 @@ export type GameResult = "blue" | "red" | "tie";
 const P1_NAME = "Blue";
 const P2_NAME = "Red";
 
-// The two pre-validated Reg M-B sample teams. Blue always brings the first, Red the second,
-// so the tally reads as a head-to-head between the two teams under random play.
-function regMbTeams(): { p1: string; p2: string; formatid: string } {
-  const def = FORMATS.vgcregmb;
-  const pool = def.packedTeams ?? [];
-  return { p1: pool[0], p2: pool[1], formatid: def.engineFormat };
-}
-
 interface ControllerOpts {
   onUpdate: (tally: Tally) => void;
+  p1Team: string; // packed team Blue plays (from the Reg M-B registry)
+  p2Team: string; // packed team Red plays
   initial?: Tally; // resume the running tally (Stop → Start keeps accumulating)
 }
 
 export class AutoBattleController {
   private readonly onUpdate: (tally: Tally) => void;
+  private readonly p1Team: string;
+  private readonly p2Team: string;
+  private readonly formatid = FORMATS.vgcregmb.engineFormat;
   private stopped = true;
   private destroyed = false;
   private looping = false;
@@ -55,6 +52,8 @@ export class AutoBattleController {
 
   constructor(opts: ControllerOpts) {
     this.onUpdate = opts.onUpdate;
+    this.p1Team = opts.p1Team;
+    this.p2Team = opts.p2Team;
     if (opts.initial) this.tally = { ...opts.initial };
   }
 
@@ -117,7 +116,6 @@ export class AutoBattleController {
 
   /** Play one full game to completion (or until stopped). Resolves with the winner. */
   private async runGame(): Promise<GameResult> {
-    const { p1, p2, formatid } = regMbTeams();
     const streams = BattleStreams.getPlayerStreams(new BattleStreams.BattleStream());
     this.activeStreams = streams;
 
@@ -128,9 +126,9 @@ export class AutoBattleController {
     void ai2.start();
 
     void streams.omniscient.write(
-      `>start ${JSON.stringify({ formatid })}\n` +
-        `>player p1 ${JSON.stringify({ name: P1_NAME, team: p1 })}\n` +
-        `>player p2 ${JSON.stringify({ name: P2_NAME, team: p2 })}`
+      `>start ${JSON.stringify({ formatid: this.formatid })}\n` +
+        `>player p1 ${JSON.stringify({ name: P1_NAME, team: this.p1Team })}\n` +
+        `>player p2 ${JSON.stringify({ name: P2_NAME, team: this.p2Team })}`
     );
 
     let result: GameResult = "tie";

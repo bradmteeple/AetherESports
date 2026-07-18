@@ -1031,6 +1031,65 @@ body {
 }
 
 /* ---------- Auto Battle (headless AI vs AI) ---------- */
+.auto-teampick {
+  display: flex;
+  align-items: flex-end;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-top: 1.5rem;
+}
+
+.auto-team-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  flex: 1 1 240px;
+}
+
+.auto-team-label {
+  font-size: 0.8rem;
+  color: #aeb8e8;
+  font-variant: small-caps;
+  letter-spacing: 0.03em;
+}
+
+.auto-team-field--blue .auto-team-label {
+  color: #00e0ff;
+}
+
+.auto-team-field--red .auto-team-label {
+  color: #ff8bd8;
+}
+
+.auto-team-select {
+  padding: 0.55rem 0.7rem;
+  border-radius: 10px;
+  background: rgba(10, 15, 36, 0.8);
+  color: #f5f7ff;
+  border: 1px solid rgba(123, 91, 255, 0.4);
+  font: inherit;
+  cursor: pointer;
+}
+
+.auto-team-field--blue .auto-team-select {
+  border-color: rgba(0, 224, 255, 0.5);
+}
+
+.auto-team-field--red .auto-team-select {
+  border-color: rgba(255, 78, 205, 0.45);
+}
+
+.auto-team-select:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.auto-vs {
+  color: #8b96c8;
+  font-weight: 700;
+  padding-bottom: 0.6rem;
+}
+
 .auto-controls {
   display: flex;
   align-items: center;
