@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { BattleSnapshot, CustomTeam, MoveOption, SwitchOption } from "./lib/engine";
+import type { BattleSnapshot, CustomTeam, MoveOption, RosterMon, SwitchOption } from "./lib/engine";
 import type { ActiveMon, BoardState, StatBlock } from "./lib/protocol";
 import { FORMAT_LIST, FORMATS, type FormatKey } from "./lib/formats";
 import { needsTarget, targetOptions } from "./lib/choices";
@@ -129,8 +129,10 @@ export default function BattlePage() {
 
           <div className="battle-main">
             <div className="battle-grid">
+              <RosterTray label="Rival AI" mons={snapshot.rosters.p2} />
               <FieldSide board={snapshot.board} side="p2" label="Rival AI" doubles={snapshot.gametype === "doubles"} foe />
               <FieldSide board={snapshot.board} side="p1" label="You" doubles={snapshot.gametype === "doubles"} />
+              <RosterTray label="You" mons={snapshot.rosters.p1} />
 
               <div className="battle-log" aria-live="polite">
                 {snapshot.log.map((line, i) => (
@@ -297,6 +299,30 @@ function FieldSide({
       {slots.map((i) => (
         <MonCard key={i} mon={board[side][i]} sideLabel={label} foe={foe} />
       ))}
+    </div>
+  );
+}
+
+function RosterTray({ label, mons }: { label: string; mons: RosterMon[] }) {
+  if (!mons.length) return null;
+  const alive = mons.filter((m) => !m.fainted).length;
+  return (
+    <div className="roster-tray">
+      <span className="roster-label">
+        {label} <span className="roster-count">{alive}/{mons.length}</span>
+      </span>
+      <div className="roster-mons">
+        {mons.map((m, i) => (
+          <span
+            key={i}
+            className={"roster-mon" + (m.fainted ? " roster-mon--fainted" : "")}
+            title={m.fainted ? `${m.name} (fainted)` : m.name}
+          >
+            <Thumb name={m.name} />
+            <span className="roster-mon-name">{m.name}</span>
+          </span>
+        ))}
+      </div>
     </div>
   );
 }

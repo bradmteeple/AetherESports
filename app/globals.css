@@ -191,6 +191,75 @@ body {
   vertical-align: middle;
 }
 
+/* Remaining-Pokémon tray shown above each side's field. */
+.roster-tray {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  padding: 0.4rem 0.6rem;
+  background: rgba(10, 15, 36, 0.45);
+  border: 1px solid rgba(123, 91, 255, 0.22);
+  border-radius: 10px;
+}
+
+.roster-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: rgba(210, 214, 240, 0.85);
+  white-space: nowrap;
+}
+
+.roster-count {
+  color: #8f7bff;
+  font-variant-numeric: tabular-nums;
+}
+
+.roster-mons {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.roster-mon {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  width: 42px;
+  text-align: center;
+}
+
+.roster-mon .mon-thumb {
+  width: 30px;
+  height: 30px;
+}
+
+.roster-mon-name {
+  font-size: 0.56rem;
+  line-height: 1.05;
+  color: rgba(200, 205, 232, 0.8);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 42px;
+}
+
+.roster-mon--fainted {
+  opacity: 0.34;
+}
+
+.roster-mon--fainted .mon-thumb {
+  filter: grayscale(1);
+}
+
+.roster-mon--fainted .roster-mon-name {
+  text-decoration: line-through;
+}
+
 .mon-card-head {
   display: flex;
   align-items: baseline;

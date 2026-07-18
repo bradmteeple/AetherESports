@@ -53,6 +53,12 @@ export interface PreviewMon {
 
 export type Prompt = "move" | "switch" | "teampreview" | "wait" | "none";
 
+// One entry in a side's "remaining Pokémon" tray.
+export interface RosterMon {
+  name: string;
+  fainted: boolean;
+}
+
 export interface BattleSnapshot {
   format: FormatKey;
   gametype: "singles" | "doubles";
@@ -61,6 +67,10 @@ export interface BattleSnapshot {
   aiReasons: string[]; // Rival AI's reasoning for the most recently completed turn
   log: string[];
   board: BoardState;
+  // What's left on each side. Player (p1): the full known team, from the request.
+  // Rival AI (p2): revealed team — the previewed sheet in team-preview formats, or
+  // only the Pokémon seen so far in random battles (no team preview => hidden until sent out).
+  rosters: { p1: RosterMon[]; p2: RosterMon[] };
   prompt: Prompt;
   active: ActiveSlot[]; // one entry per active slot (move prompt)
   forceSwitch: boolean[]; // which slots must switch (switch prompt)
@@ -115,6 +125,8 @@ export class BattleController {
   private abilityMap: { p1: Record<string, string>; p2: Record<string, string> } = { p1: {}, p2: {} };
   private reasonsByTurn: Record<number, string[]> = {};
   private maxTurn = 0;
+  // Rival AI's revealed roster, keyed by base-species id (Species Clause => unique per team).
+  private p2Roster: { key: string; name: string; fainted: boolean }[] = [];
 
   private level: number;
   private custom?: CustomTeam;
@@ -137,6 +149,7 @@ export class BattleController {
       aiReasons: [],
       log: [],
       board: emptyBoard(),
+      rosters: { p1: [], p2: [] },
       prompt: "none",
       active: [],
       forceSwitch: [],
@@ -168,6 +181,11 @@ export class BattleController {
     // the Rival AI's upcoming move before locking in their own.
     const completedTurn = this.snapshot.ended ? this.maxTurn : this.maxTurn - 1;
     this.snapshot.aiReasons = this.reasonsByTurn[completedTurn] ?? [];
+    // Refresh the Rival AI's remaining-Pokémon tray (player's side is set from each request).
+    this.snapshot.rosters = {
+      p1: this.snapshot.rosters.p1,
+      p2: this.p2Roster.map((r) => ({ name: r.name, fainted: r.fainted })),
+    };
     this.onUpdate({ ...this.snapshot, log: [...this.snapshot.log] });
   }
 
@@ -261,6 +279,7 @@ export class BattleController {
       for await (const chunk of this.streams.p1) {
         if (this.destroyed) return;
         for (const line of chunk.split("\n")) {
+          this.trackRoster(line);
           if (line.startsWith("|turn|")) {
             this.maxTurn = parseInt(line.slice("|turn|".length), 10) || this.maxTurn;
             const text = describeLine(line, this.snapshot.board);
@@ -291,6 +310,34 @@ export class BattleController {
     } catch {
       // stream torn down on reset — ignore
     }
+  }
+
+  // Track the Rival AI's (p2) revealed roster from the battle log. In team-preview formats
+  // the |poke|p2| lines expose the full sheet up front; in random battles there are none, so a
+  // Pokémon only appears once it's switched in — exactly the "hidden until sent out" behaviour.
+  private trackRoster(line: string) {
+    if (!line.startsWith("|")) return;
+    const p = line.split("|"); // p[0] === ""
+    const cmd = p[1];
+    if (cmd === "poke") {
+      if (p[2] === "p2") this.addP2(cleanName(p[3] ?? ""));
+    } else if (cmd === "switch" || cmd === "drag" || cmd === "replace") {
+      if ((p[2] ?? "").slice(0, 2) === "p2") this.addP2(cleanName(p[3] ?? ""));
+    } else if (cmd === "faint") {
+      if ((p[2] ?? "").slice(0, 2) === "p2") {
+        const ident = (p[2] ?? "").split(": ").slice(1).join(": ");
+        const key = speciesKey(ident);
+        const entry = this.p2Roster.find((r) => r.key === key);
+        if (entry) entry.fainted = true;
+      }
+    }
+  }
+
+  private addP2(name: string) {
+    if (!name) return;
+    const key = speciesKey(name);
+    if (this.p2Roster.some((r) => r.key === key)) return;
+    this.p2Roster.push({ key, name, fainted: false });
   }
 
   private lastRequest: string | null = null;
@@ -326,6 +373,12 @@ export class BattleController {
     }
     const statFor = (p: any): StatBlock | undefined =>
       this.snapshot.teamStats[toID(cleanName(p.details ?? p.ident ?? ""))];
+
+    // The player always knows their own full team — rebuild it (with fainted state) each request.
+    this.snapshot.rosters.p1 = (side?.pokemon ?? []).map((p: any) => ({
+      name: cleanName(p.details ?? p.ident ?? "?"),
+      fainted: String(p.condition ?? "").endsWith(" fnt") || String(p.condition ?? "").startsWith("0 "),
+    }));
 
     // Bench / switch options (shared) — includes item + stats for the player's team.
     this.snapshot.switches = (side?.pokemon ?? []).map((p: any, i: number) => {
@@ -413,4 +466,12 @@ function parseCond(cond: string): { hpPct: number; status: string; fainted: bool
 // "Pikachu, L84, M" / "Great Tusk" -> "Pikachu" / "Great Tusk"
 function cleanName(details: string): string {
   return details.split(",")[0].trim();
+}
+
+// Base-species id for roster matching: unifies the on-field base name ("Landorus", from a
+// |faint| ident) with the forme name ("Landorus-Therian", from |poke|/|switch| details).
+// Species Clause guarantees one Pokémon per base species on a team, so this key is unique.
+function speciesKey(name: string): string {
+  const sp = Dex.species.get(cleanName(name));
+  return toID(sp.baseSpecies || sp.name || name);
 }
