@@ -4,6 +4,7 @@ const pages = [
   { href: "/team-builder", label: "Team Builder" },
   { href: "/battle", label: "Battle" },
   { href: "/auto-mode", label: "Auto Battle" },
+  { href: "/drills", label: "Drills" },
   { href: "/my-page", label: "My Page" },
 ];
 
