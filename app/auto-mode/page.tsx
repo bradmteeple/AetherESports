@@ -3,16 +3,16 @@
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AutoBattleController, ComboStat, GameResult, Tally } from "../battle/lib/auto-engine";
-import { renderReplay, type ReplayEntry } from "../battle/lib/auto-replay";
+import { buildReplayFrames, type ReplayFrame, type RosterEntry } from "../battle/lib/auto-replay";
+import type { ActiveMon, BoardState } from "../battle/lib/protocol";
 import { encodePlan } from "../battle/lib/game-plan";
+import { pokeSprite, pokeThumb } from "../battle/lib/sprites";
 import { REG_MB_TEAMS, teamById } from "../battle/lib/reg-mb-teams";
 
 interface Replay {
   n: number;
   result: GameResult;
-  blueLead: string | null;
-  redLead: string | null;
-  entries: ReplayEntry[];
+  frames: ReplayFrame[];
 }
 
 // Blue needs a reasonable sample before its game plan is worth generating.
@@ -154,7 +154,7 @@ export default function AutoMode() {
       return;
     }
     setReplayError(null);
-    setReplay({ n: g.n, result: g.result, blueLead: g.blueLead, redLead: g.redLead, entries: renderReplay(g.lines) });
+    setReplay({ n: g.n, result: g.result, frames: buildReplayFrames(g.lines) });
   }, [replayNum]);
 
   const blueName = teamById(blueId)?.name ?? "—";
@@ -231,33 +231,17 @@ export default function AutoMode() {
         <span className={"auto-status" + (running ? " auto-status--on" : "")}>
           {running ? (loading ? "starting…" : "running…") : tally.games ? "stopped" : "idle"}
         </span>
-      </div>
 
-      {!running && planUrl && (
-        <div className="auto-plan-cta">
-          <Link className="battle-btn auto-plan-link" href={planUrl} target="_blank" rel="noopener noreferrer">
-            🧭 View Blue&apos;s game plan →
-          </Link>
-          <span className="auto-plan-hint">Opens a shareable flowchart of how Blue played this matchup.</span>
-        </div>
-      )}
-      {!running && !planUrl && tally.games > 0 && tally.games < MIN_PLAN_GAMES && (
-        <p className="auto-plan-hint auto-plan-hint--center">
-          Run at least {MIN_PLAN_GAMES} games, then Stop to generate Blue&apos;s game plan.
-        </p>
-      )}
-
-      {!running && tally.replayMax != null && (
-        <div className="auto-replay">
+        {!running && tally.replayMax != null && (
           <form
-            className="auto-replay-form"
+            className="auto-replay-pick"
             onSubmit={(e) => {
               e.preventDefault();
               viewBattle();
             }}
           >
             <label className="auto-replay-label" htmlFor="replay-num">
-              View a battle
+              Watch battle #
             </label>
             <input
               id="replay-num"
@@ -271,16 +255,33 @@ export default function AutoMode() {
               placeholder="#"
             />
             <button type="submit" className="battle-btn auto-replay-btn" disabled={!replayNum}>
-              ▶ View battle
+              ▶ Watch
             </button>
           </form>
-          <span className="auto-replay-hint">
-            Type a battle number to watch it back — battles{" "}
-            {(tally.replayMin ?? 0).toLocaleString()}–{tally.replayMax.toLocaleString()} are available.
-          </span>
-          {replayError && <p className="auto-replay-error">{replayError}</p>}
-          {replay && <ReplayPanel replay={replay} blueName={blueName} redName={redName} />}
+        )}
+      </div>
+
+      {!running && tally.replayMax != null && (
+        <p className="auto-replay-hint auto-plan-hint--center">
+          Battles {(tally.replayMin ?? 0).toLocaleString()}–{tally.replayMax.toLocaleString()} are
+          available to watch back.
+        </p>
+      )}
+      {replayError && <p className="auto-replay-error">{replayError}</p>}
+      {replay && <ReplayViewer replay={replay} blueName={blueName} redName={redName} />}
+
+      {!running && planUrl && (
+        <div className="auto-plan-cta">
+          <Link className="battle-btn auto-plan-link" href={planUrl} target="_blank" rel="noopener noreferrer">
+            🧭 View Blue&apos;s game plan →
+          </Link>
+          <span className="auto-plan-hint">Opens a shareable flowchart of how Blue played this matchup.</span>
         </div>
+      )}
+      {!running && !planUrl && tally.games > 0 && tally.games < MIN_PLAN_GAMES && (
+        <p className="auto-plan-hint auto-plan-hint--center">
+          Run at least {MIN_PLAN_GAMES} games, then Stop to generate Blue&apos;s game plan.
+        </p>
       )}
 
       <div className="auto-power">
@@ -326,7 +327,9 @@ export default function AutoMode() {
   );
 }
 
-function ReplayPanel({
+// A visual, turn-by-turn replay of one stored battle — the Battle-tab board look, with the only
+// controls being turn navigation (Prev / slider / Next). Blue is p1 (near side), Red is p2 (foe).
+function ReplayViewer({
   replay,
   blueName,
   redName,
@@ -335,33 +338,197 @@ function ReplayPanel({
   blueName: string;
   redName: string;
 }) {
+  const [idx, setIdx] = useState(0);
+
+  // Snap back to the lead whenever a different battle is loaded.
+  useEffect(() => {
+    setIdx(0);
+  }, [replay]);
+
+  const frames = replay.frames;
+  const last = frames.length - 1;
+  const clamped = Math.min(idx, last);
+  const frame = frames[clamped];
   const winner =
     replay.result === "blue"
-      ? `${blueName} (Blue) won`
+      ? `🏆 ${blueName} (Blue) won`
       : replay.result === "red"
-        ? `${redName} (Red) won`
-        : "Tie";
+        ? `🏆 ${redName} (Red) won`
+        : "The battle ended in a tie";
+
+  if (!frame) return null;
+  const turnLabel = frame.turn === 0 ? "Lead" : `Turn ${frame.turn}`;
+
   return (
-    <div className="auto-replay-panel">
-      <div className="auto-replay-head">
-        <span className="auto-replay-title">Battle #{replay.n.toLocaleString()}</span>
-        <span className="auto-replay-result">{winner}</span>
+    <div className="auto-viewer">
+      <div className="auto-viewer-head">
+        <span className="auto-viewer-title">Battle #{replay.n.toLocaleString()}</span>
+        <span className="auto-viewer-result">{winner}</span>
       </div>
-      <div className="auto-replay-leads">
-        <span className="auto-replay-lead auto-replay-lead--blue">
-          Blue led {replay.blueLead ?? "—"}
-        </span>
-        <span className="auto-replay-lead auto-replay-lead--red">
-          Red led {replay.redLead ?? "—"}
-        </span>
+
+      <div className="auto-viewer-board">
+        <ReplayRoster label={`Red · ${redName}`} accent="red" mons={frame.red} />
+        <ReplayField board={frame.board} side="p2" label="Red" foe />
+        <ReplayField board={frame.board} side="p1" label="Blue" />
+        <ReplayRoster label={`Blue · ${blueName}`} accent="blue" mons={frame.blue} />
       </div>
-      <ol className="auto-replay-log">
-        {replay.entries.map((e, i) => (
-          <li key={i} className={"auto-replay-line auto-replay-line--" + e.kind}>
-            {e.text}
-          </li>
-        ))}
-      </ol>
+
+      <div className="auto-viewer-nav">
+        <button
+          className="battle-btn battle-btn--ghost"
+          onClick={() => setIdx((i) => Math.max(0, Math.min(i, last) - 1))}
+          disabled={clamped === 0}
+        >
+          ◀ Prev
+        </button>
+        <input
+          className="auto-viewer-slider"
+          type="range"
+          min={0}
+          max={last}
+          value={clamped}
+          onChange={(e) => setIdx(Number(e.target.value))}
+          aria-label="Turn"
+        />
+        <span className="auto-viewer-turn">
+          {turnLabel} <span className="auto-viewer-turn-of">/ {frames[last].turn}</span>
+        </span>
+        <button
+          className="battle-btn battle-btn--ghost"
+          onClick={() => setIdx((i) => Math.min(last, Math.min(i, last) + 1))}
+          disabled={clamped === last}
+        >
+          Next ▶
+        </button>
+      </div>
+
+      <div className="battle-log auto-viewer-log" aria-live="polite">
+        <div className="battle-log-line battle-log-line--turn">— {turnLabel} —</div>
+        {frame.events
+          .filter((e) => e.kind !== "turn")
+          .map((e, i) => (
+            <div
+              key={i}
+              className={"battle-log-line" + (e.kind === "result" ? " battle-log-line--turn" : "")}
+            >
+              {e.text}
+            </div>
+          ))}
+        {frame.events.length === 0 && <div className="battle-log-line">The battle begins.</div>}
+      </div>
+    </div>
+  );
+}
+
+function ReplayField({
+  board,
+  side,
+  label,
+  foe,
+}: {
+  board: BoardState;
+  side: "p1" | "p2";
+  label: string;
+  foe?: boolean;
+}) {
+  return (
+    <div className="field-side field-side--doubles">
+      {[0, 1].map((i) => (
+        <ReplayMonCard key={i} mon={board[side][i]} sideLabel={label} foe={foe} />
+      ))}
+    </div>
+  );
+}
+
+function ReplayMonCard({
+  mon,
+  sideLabel,
+  foe,
+}: {
+  mon: ActiveMon | null;
+  sideLabel: string;
+  foe?: boolean;
+}) {
+  const sprite = mon && !mon.fainted ? pokeSprite(mon.name, !!foe) : null;
+  return (
+    <div className={"mon-card" + (foe ? " mon-card--foe" : "")}>
+      {sprite && (
+        <img
+          className="mon-sprite"
+          src={sprite.url}
+          alt={mon?.name ?? ""}
+          width={sprite.w}
+          height={sprite.h}
+          onError={(e) => {
+            e.currentTarget.style.display = "none";
+          }}
+        />
+      )}
+      <div className="mon-body">
+        <div className="mon-card-head">
+          <span className="mon-side">{sideLabel}</span>
+          <span className="mon-name">{mon ? mon.name : "—"}</span>
+          {mon?.status && <span className="mon-status">{mon.status.toUpperCase()}</span>}
+        </div>
+        <div className="mon-item">{mon?.item ? `@ ${mon.item}` : " "}</div>
+        <div className="hp-bar">
+          <div
+            className={
+              "hp-fill" +
+              (mon && mon.hpPct <= 20 ? " hp-fill--low" : mon && mon.hpPct <= 50 ? " hp-fill--mid" : "")
+            }
+            style={{ width: `${mon ? mon.hpPct : 0}%` }}
+          />
+        </div>
+        <div className="hp-label">{mon ? (mon.fainted ? "Fainted" : `${mon.hpPct}%`) : ""}</div>
+      </div>
+    </div>
+  );
+}
+
+function ReplayRoster({
+  label,
+  accent,
+  mons,
+}: {
+  label: string;
+  accent: "blue" | "red";
+  mons: RosterEntry[];
+}) {
+  if (!mons.length) return null;
+  const alive = mons.filter((m) => !m.fainted).length;
+  return (
+    <div className={"roster-tray roster-tray--" + accent}>
+      <span className="roster-label">
+        {label}{" "}
+        <span className="roster-count">
+          {alive}/{mons.length}
+        </span>
+      </span>
+      <div className="roster-mons">
+        {mons.map((m, i) => {
+          const url = pokeThumb(m.name);
+          return (
+            <span
+              key={i}
+              className={"roster-mon" + (m.fainted ? " roster-mon--fainted" : "")}
+              title={m.fainted ? `${m.name} (fainted)` : m.name}
+            >
+              {url && (
+                <img
+                  className="mon-thumb"
+                  src={url}
+                  alt=""
+                  onError={(e) => {
+                    e.currentTarget.style.display = "none";
+                  }}
+                />
+              )}
+              <span className="roster-mon-name">{m.name}</span>
+            </span>
+          );
+        })}
+      </div>
     </div>
   );
 }

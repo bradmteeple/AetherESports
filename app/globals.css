@@ -1369,21 +1369,14 @@ body {
 }
 
 /* ---- Watch a specific battle back --------------------------------------------------------- */
-.auto-replay {
+/* Battle-number picker, sitting on the Start/Stop controls row. */
+.auto-replay-pick {
   display: flex;
-  flex-direction: column;
   align-items: center;
   gap: 0.4rem;
-  margin: 0.5rem auto 1.5rem;
-  max-width: 760px;
-}
-
-.auto-replay-form {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-wrap: wrap;
-  gap: 0.5rem;
+  padding-left: 0.5rem;
+  margin-left: 0.25rem;
+  border-left: 1px solid rgba(123, 91, 255, 0.25);
 }
 
 .auto-replay-label {
@@ -1393,7 +1386,7 @@ body {
 }
 
 .auto-replay-input {
-  width: 7rem;
+  width: 6rem;
   padding: 0.45rem 0.6rem;
   border-radius: 8px;
   border: 1px solid rgba(123, 91, 255, 0.4);
@@ -1415,7 +1408,6 @@ body {
 .auto-replay-hint {
   color: #8b96c8;
   font-size: 0.82rem;
-  text-align: center;
 }
 
 .auto-replay-error {
@@ -1425,80 +1417,80 @@ body {
   text-align: center;
 }
 
-.auto-replay-panel {
-  width: 100%;
-  margin-top: 0.75rem;
+/* Visual replay viewer — reuses the Battle tab's board/card/log look. */
+.auto-viewer {
+  max-width: 720px;
+  margin: 0.75rem auto 1.5rem;
   border: 1px solid rgba(123, 91, 255, 0.3);
-  border-radius: 12px;
-  background: rgba(14, 16, 34, 0.7);
-  overflow: hidden;
+  border-radius: 14px;
+  background: rgba(12, 14, 30, 0.72);
+  padding: 0.9rem 1rem 1.1rem;
   text-align: left;
 }
 
-.auto-replay-head {
+.auto-viewer-head {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: 0.75rem;
-  padding: 0.7rem 1rem;
-  background: rgba(123, 91, 255, 0.12);
-  border-bottom: 1px solid rgba(123, 91, 255, 0.25);
+  margin-bottom: 0.75rem;
 }
 
-.auto-replay-title {
+.auto-viewer-title {
   font-weight: 700;
   color: #f0f2ff;
 }
 
-.auto-replay-result {
+.auto-viewer-result {
   font-size: 0.9rem;
-  color: #c7cff2;
+  color: #ffe08a;
 }
 
-.auto-replay-leads {
+.auto-viewer-board {
+  display: grid;
+  gap: 0.6rem;
+}
+
+/* Turn navigation — the only interactive controls in the viewer. */
+.auto-viewer-nav {
   display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.7rem;
+  margin: 0.9rem 0 0.6rem;
   flex-wrap: wrap;
-  gap: 0.5rem 1.25rem;
-  padding: 0.5rem 1rem;
-  font-size: 0.85rem;
-  border-bottom: 1px solid rgba(123, 91, 255, 0.15);
 }
 
-.auto-replay-lead--blue {
-  color: #6ea8ff;
+.auto-viewer-slider {
+  flex: 1;
+  min-width: 140px;
+  max-width: 320px;
+  accent-color: #7b5bff;
+  cursor: pointer;
 }
 
-.auto-replay-lead--red {
-  color: #ff7a8a;
-}
-
-.auto-replay-log {
-  list-style: none;
-  margin: 0;
-  padding: 0.5rem 1rem 0.9rem;
-  max-height: 420px;
-  overflow-y: auto;
-  font-size: 0.88rem;
-  line-height: 1.5;
-  color: #cdd4f0;
-}
-
-.auto-replay-line {
-  padding: 0.05rem 0;
-}
-
-.auto-replay-line--turn {
-  margin-top: 0.55rem;
+.auto-viewer-turn {
   font-weight: 700;
-  color: #9d7bff;
-  border-top: 1px solid rgba(123, 91, 255, 0.18);
-  padding-top: 0.4rem;
+  color: #e7eaff;
+  min-width: 6.5rem;
+  text-align: center;
 }
 
-.auto-replay-line--result {
-  margin-top: 0.55rem;
-  font-weight: 700;
-  color: #7bffb0;
+.auto-viewer-turn-of {
+  color: #8b96c8;
+  font-weight: 500;
+}
+
+.auto-viewer-log {
+  height: 180px;
+}
+
+.roster-tray--blue {
+  border-color: rgba(110, 168, 255, 0.35);
+}
+
+.roster-tray--red {
+  border-color: rgba(255, 122, 138, 0.35);
 }
 
 .plan-page {
