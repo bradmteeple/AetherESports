@@ -2,15 +2,15 @@
 //
 // Runs real Pokémon Showdown battles between two *random* players in the VGC 2026 Reg M-B
 // format, back-to-back and as fast as the engine allows ("turbo"). Nothing is rendered
-// per turn — the output is a running win/loss/tie tally plus, per side, how often each lead
-// combination was brought. This is deliberately separate from the interactive Battle tab's
-// BattleController (engine.ts), which drives a human on p1.
+// per turn — the output is a running win/loss/tie tally plus, per side, the top 3 *winning*
+// 4-of-6 Team Preview selections (the four Pokémon that side brought). This is deliberately
+// separate from the interactive Battle tab's BattleController (engine.ts), which drives a human.
 //
 // Both sides are RandomPlayerAI subclasses (unseeded => a fresh random PRNG per game), and each
 // game gets a fresh BattleStream (also unseeded), so no two games play out identically. The
-// base RandomPlayerAI picks its Team Preview with "default" (always the same two leads), so we
-// override chooseTeamPreview to bring a random selection — that's what makes the lead
-// distribution meaningful.
+// base RandomPlayerAI picks its Team Preview with "default" (always the same four), so we
+// override chooseTeamPreview to bring a random selection — and record which four, so we can rank
+// the selections by how often they won.
 
 import "./node-shim"; // must precede any @pkmn import — defines Node globals for the browser
 import { BattleStreams, RandomPlayerAI } from "@pkmn/sim";
@@ -21,9 +21,10 @@ installChampionsStats(); // Reg M-B (Champions): 1 EV = +1 stat; idempotent.
 
 const TEAM_SIZE = FORMATS.vgcregmb.teamSize; // bring N (4 for Reg M-B)
 
-export interface LeadCombo {
-  combo: string; // "Torkoal + Hatterene" (the two Pokémon sorted, so order-independent)
-  count: number;
+export interface ComboStat {
+  combo: string; // the 4 brought Pokémon, sorted + joined: "A + B + C + D" (order-independent)
+  games: number; // games this selection was brought
+  wins: number; // games this selection won
 }
 
 export interface Tally {
@@ -31,24 +32,27 @@ export interface Tally {
   red: number; // p2 wins
   ties: number;
   games: number;
-  leadsBlue: LeadCombo[]; // Blue's lead pairs, most-used first
-  leadsRed: LeadCombo[]; // Red's lead pairs, most-used first
+  topBlue: ComboStat[]; // Blue's top 3 winning 4-of-6 selections (most wins first)
+  topRed: ComboStat[]; // Red's top 3 winning 4-of-6 selections
 }
 
 export type GameResult = "blue" | "red" | "tie";
 
 interface GameOutcome {
   result: GameResult;
-  blueLead: string | null; // sorted "A + B" combo Blue led with, if captured
-  redLead: string | null;
+  blueCombo: string | null; // sorted "A + B + C + D" of the four Blue brought, if captured
+  redCombo: string | null;
 }
 
 const P1_NAME = "Blue";
 const P2_NAME = "Red";
 
 // A random-play AI that also brings a RANDOM Team Preview selection (rather than the base
-// class's fixed "default"), so leads vary game to game.
+// class's fixed "default"), so the selection varies game to game — and records which four it
+// brought (sorted species combo) so the controller can rank selections by wins.
 class LeadRandomAI extends RandomPlayerAI {
+  selectedCombo: string | null = null;
+
   protected override chooseTeamPreview(team: any[]): string {
     const n = team.length;
     const idx = Array.from({ length: n }, (_, i) => i + 1);
@@ -58,7 +62,14 @@ class LeadRandomAI extends RandomPlayerAI {
       [idx[i], idx[j]] = [idx[j], idx[i]];
     }
     const bring = Math.min(TEAM_SIZE, n);
-    return "team " + idx.slice(0, bring).join("");
+    const pick = idx.slice(0, bring);
+    // `team` is the request's side.pokemon; each entry carries a `details` string ("Torkoal, L50, M").
+    this.selectedCombo = pick
+      .map((i) => cleanName((team[i - 1] && (team[i - 1].details || team[i - 1].ident)) || ""))
+      .filter(Boolean)
+      .sort()
+      .join(" + ");
+    return "team " + pick.join("");
   }
 }
 
@@ -67,16 +78,17 @@ function cleanName(details: string): string {
   return (details || "").split(",")[0].trim();
 }
 
-function comboKey(a: string | null, b: string | null): string | null {
-  const both = [a, b].filter((x): x is string => !!x);
-  if (both.length < 2) return null;
-  return both.slice().sort().join(" + ");
-}
-
-function sortLeads(map: Map<string, number>): LeadCombo[] {
+// All selections ranked by wins (tiebreak: higher win rate, then name). The UI shows the top 3;
+// the full list is kept so a Stop → Start resume doesn't lose the rest.
+function sortByWins(map: Map<string, { games: number; wins: number }>): ComboStat[] {
   return Array.from(map.entries())
-    .map(([combo, count]) => ({ combo, count }))
-    .sort((x, y) => y.count - x.count || x.combo.localeCompare(y.combo));
+    .map(([combo, { games, wins }]) => ({ combo, games, wins }))
+    .sort(
+      (x, y) =>
+        y.wins - x.wins ||
+        y.wins / y.games - x.wins / x.games ||
+        x.combo.localeCompare(y.combo)
+    );
 }
 
 interface ControllerOpts {
@@ -95,8 +107,9 @@ export class AutoBattleController {
   private destroyed = false;
   private looping = false;
   private counts = { blue: 0, red: 0, ties: 0, games: 0 };
-  private readonly leadBlue = new Map<string, number>();
-  private readonly leadRed = new Map<string, number>();
+  // Per side: selection combo -> { games brought, games won }.
+  private readonly comboBlue = new Map<string, { games: number; wins: number }>();
+  private readonly comboRed = new Map<string, { games: number; wins: number }>();
   private lastEmit = 0;
 
   // The stream of the game currently in flight, so stop()/destroy() can tear it down and let
@@ -110,8 +123,8 @@ export class AutoBattleController {
     if (opts.initial) {
       const { blue, red, ties, games } = opts.initial;
       this.counts = { blue, red, ties, games };
-      for (const { combo, count } of opts.initial.leadsBlue ?? []) this.leadBlue.set(combo, count);
-      for (const { combo, count } of opts.initial.leadsRed ?? []) this.leadRed.set(combo, count);
+      for (const { combo, games: g, wins } of opts.initial.topBlue ?? []) this.comboBlue.set(combo, { games: g, wins });
+      for (const { combo, games: g, wins } of opts.initial.topRed ?? []) this.comboRed.set(combo, { games: g, wins });
     }
   }
 
@@ -160,8 +173,9 @@ export class AutoBattleController {
         else if (outcome.result === "red") this.counts.red++;
         else this.counts.ties++;
         this.counts.games++;
-        if (outcome.blueLead) this.leadBlue.set(outcome.blueLead, (this.leadBlue.get(outcome.blueLead) ?? 0) + 1);
-        if (outcome.redLead) this.leadRed.set(outcome.redLead, (this.leadRed.get(outcome.redLead) ?? 0) + 1);
+        // Each side's selection played one game; the winning side's selection also won it.
+        this.recordCombo(this.comboBlue, outcome.blueCombo, outcome.result === "blue");
+        this.recordCombo(this.comboRed, outcome.redCombo, outcome.result === "red");
         this.emit(false);
         // Yield to the event loop so the Start/Stop button and React stay responsive even
         // when thousands of games run per second.
@@ -174,7 +188,19 @@ export class AutoBattleController {
     }
   }
 
-  /** Play one full game to completion (or until stopped). Resolves with the winner + leads. */
+  private recordCombo(
+    map: Map<string, { games: number; wins: number }>,
+    combo: string | null,
+    won: boolean
+  ) {
+    if (!combo) return;
+    const cur = map.get(combo) ?? { games: 0, wins: 0 };
+    cur.games++;
+    if (won) cur.wins++;
+    map.set(combo, cur);
+  }
+
+  /** Play one full game to completion (or until stopped). Resolves with the winner + selections. */
   private async runGame(): Promise<GameOutcome> {
     const streams = BattleStreams.getPlayerStreams(new BattleStreams.BattleStream());
     this.activeStreams = streams;
@@ -191,25 +217,12 @@ export class AutoBattleController {
         `>player p2 ${JSON.stringify({ name: P2_NAME, team: this.p2Team })}`
     );
 
-    // First species to appear in each active slot = that side's lead (never overwritten).
-    const p1Lead: (string | null)[] = [null, null];
-    const p2Lead: (string | null)[] = [null, null];
-
     let result: GameResult = "tie";
     try {
       for await (const chunk of streams.omniscient) {
         if (this.stopped || this.destroyed) break;
         let done = false;
         for (const line of chunk.split("\n")) {
-          if (line.startsWith("|switch|") || line.startsWith("|drag|")) {
-            const parts = line.split("|"); // ["", "switch", "p1a: X", "Species, L50, M", ...]
-            const pos = parts[2] ?? "";
-            const species = cleanName(parts[3] ?? "");
-            const slot = pos.charAt(2) === "b" ? 1 : 0;
-            if (pos.startsWith("p1") && p1Lead[slot] === null) p1Lead[slot] = species;
-            else if (pos.startsWith("p2") && p2Lead[slot] === null) p2Lead[slot] = species;
-            continue;
-          }
           if (line.startsWith("|win|")) {
             const winner = line.slice("|win|".length).trim();
             result = winner === P1_NAME ? "blue" : winner === P2_NAME ? "red" : "tie";
@@ -234,14 +247,14 @@ export class AutoBattleController {
         /* noop */
       }
     }
-    return { result, blueLead: comboKey(p1Lead[0], p1Lead[1]), redLead: comboKey(p2Lead[0], p2Lead[1]) };
+    return { result, blueCombo: ai1.selectedCombo, redCombo: ai2.selectedCombo };
   }
 
   private snapshot(): Tally {
     return {
       ...this.counts,
-      leadsBlue: sortLeads(this.leadBlue),
-      leadsRed: sortLeads(this.leadRed),
+      topBlue: sortByWins(this.comboBlue),
+      topRed: sortByWins(this.comboRed),
     };
   }
 

@@ -1,10 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AutoBattleController, LeadCombo, Tally } from "../battle/lib/auto-engine";
+import type { AutoBattleController, ComboStat, Tally } from "../battle/lib/auto-engine";
 import { REG_MB_TEAMS, teamById } from "../battle/lib/reg-mb-teams";
 
-const ZERO: Tally = { blue: 0, red: 0, ties: 0, games: 0, leadsBlue: [], leadsRed: [] };
+const ZERO: Tally = { blue: 0, red: 0, ties: 0, games: 0, topBlue: [], topRed: [] };
 
 const DEFAULT_BLUE = REG_MB_TEAMS[0]?.id ?? "";
 const DEFAULT_RED = (REG_MB_TEAMS[1] ?? REG_MB_TEAMS[0])?.id ?? "";
@@ -78,8 +78,8 @@ export default function AutoMode() {
       <p className="page-text">
         Pick a team for each side, then press Start. Two random-play AIs battle those teams in
         VGC 2026 Reg M-B, back-to-back at full speed — there&apos;s nothing to watch, it just
-        runs and tallies results until you press Stop. Any team can play any team (mirrors
-        included).
+        runs and tallies results until you press Stop. Below the score, each side&apos;s top 3
+        winning 4-of-6 selections are labeled. Any team can play any team (mirrors included).
       </p>
 
       <div className="auto-teampick">
@@ -167,46 +167,45 @@ export default function AutoMode() {
       </div>
 
       <div className="auto-leads">
-        <LeadColumn title={`Blue leads · ${blueName}`} accent="blue" leads={tally.leadsBlue} games={tally.games} />
-        <LeadColumn title={`Red leads · ${redName}`} accent="red" leads={tally.leadsRed} games={tally.games} />
+        <WinColumn title={`Blue — top winning picks · ${blueName}`} accent="blue" combos={tally.topBlue} />
+        <WinColumn title={`Red — top winning picks · ${redName}`} accent="red" combos={tally.topRed} />
       </div>
 
       <p className="auto-note">
-        Every game uses fresh randomness (including a random lead each game), so no two play out
-        the same. Changing a team starts a new matchup and resets the tally.
+        Each side brings a random 4 of its 6 every game; the columns show that side&apos;s top 3
+        selections by wins (with win rate). Changing a team starts a new matchup and resets the tally.
       </p>
     </div>
   );
 }
 
-function LeadColumn({
+function WinColumn({
   title,
   accent,
-  leads,
-  games,
+  combos,
 }: {
   title: string;
   accent: "blue" | "red";
-  leads: LeadCombo[];
-  games: number;
+  combos: ComboStat[];
 }) {
+  const top = combos.slice(0, 3); // label only the top 3 winning selections
   return (
     <div className={"auto-lead-col auto-lead-col--" + accent}>
       <div className="auto-lead-title">{title}</div>
-      {leads.length === 0 ? (
+      {top.length === 0 ? (
         <p className="auto-lead-empty">No games yet.</p>
       ) : (
-        <ul className="auto-lead-list">
-          {leads.map((l) => (
-            <li key={l.combo} className="auto-lead-row">
-              <span className="auto-lead-combo">{l.combo}</span>
+        <ol className="auto-lead-list">
+          {top.map((c) => (
+            <li key={c.combo} className="auto-lead-row">
+              <span className="auto-lead-combo">{c.combo}</span>
               <span className="auto-lead-count">
-                {l.count.toLocaleString()}
-                {games ? ` · ${Math.round((l.count / games) * 100)}%` : ""}
+                {c.wins.toLocaleString()} {c.wins === 1 ? "win" : "wins"}
+                {c.games ? ` · ${Math.round((c.wins / c.games) * 100)}%` : ""}
               </span>
             </li>
           ))}
-        </ul>
+        </ol>
       )}
     </div>
   );
