@@ -1368,6 +1368,139 @@ body {
   margin-top: 0.5rem;
 }
 
+/* ---- Watch a specific battle back --------------------------------------------------------- */
+.auto-replay {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0.5rem auto 1.5rem;
+  max-width: 760px;
+}
+
+.auto-replay-form {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.auto-replay-label {
+  color: #c7cff2;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.auto-replay-input {
+  width: 7rem;
+  padding: 0.45rem 0.6rem;
+  border-radius: 8px;
+  border: 1px solid rgba(123, 91, 255, 0.4);
+  background: rgba(18, 20, 40, 0.85);
+  color: #f0f2ff;
+  font-size: 0.95rem;
+  text-align: center;
+}
+
+.auto-replay-btn {
+  border-color: rgba(123, 91, 255, 0.6);
+  background: rgba(123, 91, 255, 0.2);
+}
+
+.auto-replay-btn:hover:not(:disabled) {
+  background: rgba(123, 91, 255, 0.35);
+}
+
+.auto-replay-hint {
+  color: #8b96c8;
+  font-size: 0.82rem;
+  text-align: center;
+}
+
+.auto-replay-error {
+  color: #ff9b9b;
+  font-size: 0.85rem;
+  margin: 0.15rem 0 0;
+  text-align: center;
+}
+
+.auto-replay-panel {
+  width: 100%;
+  margin-top: 0.75rem;
+  border: 1px solid rgba(123, 91, 255, 0.3);
+  border-radius: 12px;
+  background: rgba(14, 16, 34, 0.7);
+  overflow: hidden;
+  text-align: left;
+}
+
+.auto-replay-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.7rem 1rem;
+  background: rgba(123, 91, 255, 0.12);
+  border-bottom: 1px solid rgba(123, 91, 255, 0.25);
+}
+
+.auto-replay-title {
+  font-weight: 700;
+  color: #f0f2ff;
+}
+
+.auto-replay-result {
+  font-size: 0.9rem;
+  color: #c7cff2;
+}
+
+.auto-replay-leads {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.25rem;
+  padding: 0.5rem 1rem;
+  font-size: 0.85rem;
+  border-bottom: 1px solid rgba(123, 91, 255, 0.15);
+}
+
+.auto-replay-lead--blue {
+  color: #6ea8ff;
+}
+
+.auto-replay-lead--red {
+  color: #ff7a8a;
+}
+
+.auto-replay-log {
+  list-style: none;
+  margin: 0;
+  padding: 0.5rem 1rem 0.9rem;
+  max-height: 420px;
+  overflow-y: auto;
+  font-size: 0.88rem;
+  line-height: 1.5;
+  color: #cdd4f0;
+}
+
+.auto-replay-line {
+  padding: 0.05rem 0;
+}
+
+.auto-replay-line--turn {
+  margin-top: 0.55rem;
+  font-weight: 700;
+  color: #9d7bff;
+  border-top: 1px solid rgba(123, 91, 255, 0.18);
+  padding-top: 0.4rem;
+}
+
+.auto-replay-line--result {
+  margin-top: 0.55rem;
+  font-weight: 700;
+  color: #7bffb0;
+}
+
 .plan-page {
   max-width: 860px;
   margin: 0 auto;

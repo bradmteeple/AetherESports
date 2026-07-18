@@ -2,9 +2,18 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AutoBattleController, ComboStat, Tally } from "../battle/lib/auto-engine";
+import type { AutoBattleController, ComboStat, GameResult, Tally } from "../battle/lib/auto-engine";
+import { renderReplay, type ReplayEntry } from "../battle/lib/auto-replay";
 import { encodePlan } from "../battle/lib/game-plan";
 import { REG_MB_TEAMS, teamById } from "../battle/lib/reg-mb-teams";
+
+interface Replay {
+  n: number;
+  result: GameResult;
+  blueLead: string | null;
+  redLead: string | null;
+  entries: ReplayEntry[];
+}
 
 // Blue needs a reasonable sample before its game plan is worth generating.
 const MIN_PLAN_GAMES = 50;
@@ -18,6 +27,8 @@ const ZERO: Tally = {
   powerRed: 0,
   topBlue: [],
   topRed: [],
+  replayMin: null,
+  replayMax: null,
 };
 
 const DEFAULT_BLUE = REG_MB_TEAMS[0]?.id ?? "";
@@ -30,6 +41,9 @@ export default function AutoMode() {
   const [blueId, setBlueId] = useState(DEFAULT_BLUE);
   const [redId, setRedId] = useState(DEFAULT_RED);
   const [planUrl, setPlanUrl] = useState<string | null>(null);
+  const [replayNum, setReplayNum] = useState<string>(""); // the battle number typed in
+  const [replay, setReplay] = useState<Replay | null>(null); // the battle currently shown
+  const [replayError, setReplayError] = useState<string | null>(null);
   const controllerRef = useRef<AutoBattleController | null>(null);
   const runningRef = useRef(false); // mirrors `running` for async guards
   const aliveRef = useRef(true);
@@ -53,6 +67,9 @@ export default function AutoMode() {
     setRun(false);
     setTally(ZERO);
     setPlanUrl(null);
+    setReplay(null);
+    setReplayError(null);
+    setReplayNum("");
     setLoading(false);
     return () => {
       controllerRef.current?.destroy();
@@ -64,6 +81,8 @@ export default function AutoMode() {
   // behind it). The button flips to running immediately; the loop begins once the chunk loads.
   const start = useCallback(async () => {
     setPlanUrl(null);
+    setReplay(null);
+    setReplayError(null);
     setRun(true);
     try {
       if (!controllerRef.current) {
@@ -100,13 +119,43 @@ export default function AutoMode() {
     if (c) {
       const plan = c.bluePlan(teamById(blueId)?.name ?? "Blue", teamById(redId)?.name ?? "Red");
       setPlanUrl(plan.games >= MIN_PLAN_GAMES ? `/auto-mode/plan?d=${encodePlan(plan)}` : null);
+      // Default the "view a battle" box to the most recent game so a click just works.
+      const t = c.getTally();
+      if (t.replayMax != null) setReplayNum(String(t.replayMax));
     }
   }, [blueId, redId, setRun]);
 
   const reset = useCallback(() => {
     setPlanUrl(null);
+    setReplay(null);
+    setReplayError(null);
+    setReplayNum("");
     controllerRef.current?.reset();
   }, []);
+
+  // Look up the typed battle number and render its play-by-play.
+  const viewBattle = useCallback(() => {
+    const c = controllerRef.current;
+    const n = parseInt(replayNum, 10);
+    if (!c || !Number.isFinite(n)) {
+      setReplay(null);
+      setReplayError("Enter a battle number.");
+      return;
+    }
+    const g = c.getReplay(n);
+    if (!g) {
+      setReplay(null);
+      const t = c.getTally();
+      setReplayError(
+        t.replayMin != null && t.replayMax != null
+          ? `Battle #${n} isn't available — only battles ${t.replayMin.toLocaleString()}–${t.replayMax.toLocaleString()} are kept.`
+          : `No battles have been played yet.`
+      );
+      return;
+    }
+    setReplayError(null);
+    setReplay({ n: g.n, result: g.result, blueLead: g.blueLead, redLead: g.redLead, entries: renderReplay(g.lines) });
+  }, [replayNum]);
 
   const blueName = teamById(blueId)?.name ?? "—";
   const redName = teamById(redId)?.name ?? "—";
@@ -198,6 +247,42 @@ export default function AutoMode() {
         </p>
       )}
 
+      {!running && tally.replayMax != null && (
+        <div className="auto-replay">
+          <form
+            className="auto-replay-form"
+            onSubmit={(e) => {
+              e.preventDefault();
+              viewBattle();
+            }}
+          >
+            <label className="auto-replay-label" htmlFor="replay-num">
+              View a battle
+            </label>
+            <input
+              id="replay-num"
+              className="auto-replay-input"
+              type="number"
+              inputMode="numeric"
+              min={tally.replayMin ?? 1}
+              max={tally.replayMax}
+              value={replayNum}
+              onChange={(e) => setReplayNum(e.target.value)}
+              placeholder="#"
+            />
+            <button type="submit" className="battle-btn auto-replay-btn" disabled={!replayNum}>
+              ▶ View battle
+            </button>
+          </form>
+          <span className="auto-replay-hint">
+            Type a battle number to watch it back — battles{" "}
+            {(tally.replayMin ?? 0).toLocaleString()}–{tally.replayMax.toLocaleString()} are available.
+          </span>
+          {replayError && <p className="auto-replay-error">{replayError}</p>}
+          {replay && <ReplayPanel replay={replay} blueName={blueName} redName={redName} />}
+        </div>
+      )}
+
       <div className="auto-power">
         <PowerBar label={`Blue power · ${blueName}`} accent="blue" pct={bluePow} />
         <PowerBar label={`Red power · ${redName}`} accent="red" pct={redPow} />
@@ -237,6 +322,46 @@ export default function AutoMode() {
         are meaningful. Changing a team or pressing Reset starts a new arms race (power and learning
         back to zero).
       </p>
+    </div>
+  );
+}
+
+function ReplayPanel({
+  replay,
+  blueName,
+  redName,
+}: {
+  replay: Replay;
+  blueName: string;
+  redName: string;
+}) {
+  const winner =
+    replay.result === "blue"
+      ? `${blueName} (Blue) won`
+      : replay.result === "red"
+        ? `${redName} (Red) won`
+        : "Tie";
+  return (
+    <div className="auto-replay-panel">
+      <div className="auto-replay-head">
+        <span className="auto-replay-title">Battle #{replay.n.toLocaleString()}</span>
+        <span className="auto-replay-result">{winner}</span>
+      </div>
+      <div className="auto-replay-leads">
+        <span className="auto-replay-lead auto-replay-lead--blue">
+          Blue led {replay.blueLead ?? "—"}
+        </span>
+        <span className="auto-replay-lead auto-replay-lead--red">
+          Red led {replay.redLead ?? "—"}
+        </span>
+      </div>
+      <ol className="auto-replay-log">
+        {replay.entries.map((e, i) => (
+          <li key={i} className={"auto-replay-line auto-replay-line--" + e.kind}>
+            {e.text}
+          </li>
+        ))}
+      </ol>
     </div>
   );
 }

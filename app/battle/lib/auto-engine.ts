@@ -47,9 +47,32 @@ export interface Tally {
   powerRed: number;
   topBlue: ComboStat[]; // Blue's top winning 4-of-6 selections (by win rate)
   topRed: ComboStat[]; // Red's top winning 4-of-6 selections
+  replayMin: number | null; // smallest game number still available to replay (null if none)
+  replayMax: number | null; // latest game number available to replay
 }
 
 export type GameResult = "blue" | "red" | "tie";
+
+// A finished game's play-by-play, kept so the user can type a number and watch that battle back.
+export interface GameLog {
+  n: number; // 1-indexed game number (matches Tally.games at the moment it finished)
+  result: GameResult;
+  blueLead: string | null; // "A + B" of the two Blue led with
+  redLead: string | null; // "A + B" of the two Red led with
+  lines: string[]; // raw Showdown protocol lines (public battle log)
+}
+
+// How many recent games to keep full logs for. A VGC log is a few KB; this caps replay memory at
+// a few MB while covering far more than a user would scroll back to after pressing Stop.
+const REPLAY_CAP = 500;
+
+// Protocol lines worth storing for a replay (drop per-turn housekeeping noise the viewer ignores).
+function keepReplayLine(line: string): boolean {
+  if (!line.startsWith("|")) return false;
+  if (line === "|" || line === "|upkeep") return false;
+  if (line.startsWith("|t:") || line.startsWith("|request") || line.startsWith("|split")) return false;
+  return true;
+}
 
 // speciesId -> moveId -> times that species was seen using that move (opponent tendencies).
 type Book = Record<string, Record<string, number>>;
@@ -62,6 +85,7 @@ interface GameOutcome {
   redLead: string | null; // sorted "A + B" of the two Red sent out first
   obsBlue: Book; // what Blue observed of Red this game (Red's moves)
   obsRed: Book; // what Red observed of Blue this game (Blue's moves)
+  lines: string[]; // the game's public protocol log, for replay
 }
 
 const P1_NAME = "Blue";
@@ -197,6 +221,8 @@ export class AutoBattleController {
   // blueLeads = Blue's own lead → Blue wins; redLeads = the Red lead Blue faced → Blue wins.
   private readonly blueLeads = new Map<string, { games: number; wins: number }>();
   private readonly redLeads = new Map<string, { games: number; wins: number }>();
+  // Rolling window of the most recent games' logs (oldest first), so Stop → "view battle N" works.
+  private readonly replays: GameLog[] = [];
   private lastEmit = 0;
 
   // The stream of the game currently in flight, so stop()/destroy() can tear it down and let
@@ -235,6 +261,7 @@ export class AutoBattleController {
     this.comboRed.clear();
     this.blueLeads.clear();
     this.redLeads.clear();
+    this.replays.length = 0;
     this.emit(true);
   }
 
@@ -247,6 +274,11 @@ export class AutoBattleController {
 
   getTally(): Tally {
     return this.snapshot();
+  }
+
+  /** The stored play-by-play for game `n`, or null if it's out of the kept window. */
+  getReplay(n: number): GameLog | null {
+    return this.replays.find((r) => r.n === n) ?? null;
   }
 
   /** Blue's game plan vs Red, derived from the run so far (best selection, learned threats). */
@@ -299,6 +331,16 @@ export class AutoBattleController {
         this.recordCombo(this.blueLeads, o.blueLead, o.result === "blue");
         this.recordCombo(this.redLeads, o.redLead, o.result === "blue");
 
+        // Keep this game's log in the rolling replay window (evict the oldest past the cap).
+        this.replays.push({
+          n: this.counts.games,
+          result: o.result,
+          blueLead: o.blueLead,
+          redLead: o.redLead,
+          lines: o.lines,
+        });
+        if (this.replays.length > REPLAY_CAP) this.replays.shift();
+
         // Learn: fold this game's observations into each side's persistent model.
         mergeBook(this.bookBlue, o.obsBlue);
         mergeBook(this.bookRed, o.obsRed);
@@ -347,6 +389,9 @@ export class AutoBattleController {
     const obsBlue: Book = {};
     const obsRed: Book = {};
 
+    // The public protocol log, captured line-by-line for replay.
+    const lines: string[] = [];
+
     // Bots built at the current power level; a fresh PRNG each game keeps play varied.
     const ai1 = new LearningBot(streams.p1, "p1", this.powerBlue, this.bookBlue, obsBlue);
     const ai2 = new LearningBot(streams.p2, "p2", this.powerRed, this.bookRed, obsRed);
@@ -369,6 +414,7 @@ export class AutoBattleController {
         if (this.stopped || this.destroyed) break;
         let done = false;
         for (const line of chunk.split("\n")) {
+          if (keepReplayLine(line)) lines.push(line);
           if (line.startsWith("|switch|") || line.startsWith("|drag|")) {
             const parts = line.split("|"); // ["", "switch", "p1a: X", "Species, L50, M", ...]
             const pos = parts[2] ?? "";
@@ -410,6 +456,7 @@ export class AutoBattleController {
       redLead: pairKey(p2Lead[0], p2Lead[1]),
       obsBlue,
       obsRed,
+      lines,
     };
   }
 
@@ -420,6 +467,8 @@ export class AutoBattleController {
       powerRed: this.powerRed,
       topBlue: sortByWinRate(this.comboBlue),
       topRed: sortByWinRate(this.comboRed),
+      replayMin: this.replays[0]?.n ?? null,
+      replayMax: this.replays[this.replays.length - 1]?.n ?? null,
     };
   }
 
