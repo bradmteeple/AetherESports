@@ -211,8 +211,8 @@ export class ReasoningAI extends RandomPlayerAI {
       );
       const switches = active.trapped ? [] : canSwitch;
 
-      // Voluntary pivot out of a losing matchup.
-      const pivot = this.shouldSwitch(i, switches, pokemon);
+      // Voluntary pivot — only when switching is clearly the best play.
+      const pivot = this.shouldSwitch(i, moves, switches, pokemon);
       if (pivot != null) {
         chosen.push(pivot);
         const sp = cleanName(pokemon[pivot - 1]?.details || "");
@@ -273,28 +273,66 @@ export class ReasoningAI extends RandomPlayerAI {
     return s;
   }
 
-  // Bench slot to pivot to if the active mon (slot i) is in a clearly losing matchup and a benched
-  // mon is meaningfully better; else null. Only a skilled decision (weakened AIs stay in).
-  private shouldSwitch(i: number, switches: number[], pokemon: any[]): number | null {
+  // Best super-effective potential of an attacker's STAB types vs a defender (× STAB).
+  protected typeThreat(atkTypes: string[], defTypes: string[]): number {
+    return atkTypes.reduce((mx, t) => Math.max(mx, this.effectiveness(t, defTypes)), 0) * 1.5;
+  }
+
+  // Best super-effective multiplier the active mon can actually deal this turn from its moves.
+  protected bestOffense(
+    moves: { choice: string; move: any }[],
+    myTypes: string[],
+    foes: { types: string[] }[]
+  ): number {
+    let best = 0;
+    for (const { move } of moves) {
+      const mv = Dex.moves.get(move.move);
+      if (mv.category === "Status") continue;
+      const stab = myTypes.includes(mv.type) ? 1.5 : 1;
+      for (const f of foes) best = Math.max(best, this.effectiveness(mv.type, f.types) * stab);
+    }
+    return best;
+  }
+
+  // A pivot is the best play only when the active mon (slot i) is threatened by a super-effective
+  // hit, can't hit back hard this turn (walled), AND a benched mon hard-answers the threat —
+  // resisting it and threatening it back. Otherwise it stays in and attacks.
+  private shouldSwitch(
+    i: number,
+    moves: { choice: string; move: any }[],
+    switches: number[],
+    pokemon: any[]
+  ): number | null {
     if (!switches.length) return null;
     if (this.mistakeRate > 0 && this.prng.random() < this.mistakeRate) return null;
     const foes = this.foes();
     if (!foes.length) return null;
     const myName = this.activeSp[this.side][i] || cleanName(pokemon[i]?.details || "");
     const myTypes = myName ? Dex.species.get(myName).types ?? [] : [];
-    const cur = this.matchup(myTypes, foes);
+
+    // In danger? (a foe threatens a super-effective STAB hit)
+    const worst = foes
+      .map((f) => ({ f, t: this.typeThreat(f.types, myTypes) }))
+      .sort((a, b) => b.t - a.t)[0];
+    if (!worst || worst.t < 2) return null; // safe → attacking is fine
+    // Can I hit back super-effectively this turn? Then stay and pressure.
+    if (this.bestOffense(moves, myTypes, foes) >= 2) return null;
+
+    // Walled + threatened: bring the best hard answer to the biggest threat, if we have one.
+    const threat = worst.f;
     let bestSlot = -1;
-    let bestScore = -Infinity;
+    let bestVal = 0;
     for (const s of switches) {
       const nm = cleanName(pokemon[s - 1]?.details || "");
       const tt = nm ? Dex.species.get(nm).types ?? [] : [];
-      const sc = this.matchup(tt, foes);
-      if (sc > bestScore) ((bestScore = sc), (bestSlot = s));
+      const incoming = this.typeThreat(threat.types, tt); // how hard the threat hits the switch-in
+      const pressure = tt.reduce((mx, t) => Math.max(mx, this.effectiveness(t, threat.types)), 0);
+      if (incoming <= 1 && pressure >= 2 && pressure - incoming > bestVal) {
+        bestVal = pressure - incoming;
+        bestSlot = s;
+      }
     }
-    // Pivot only out of a losing matchup (cur < 0) into a bench mon that is clearly favorable —
-    // conservative enough to avoid tempo-losing switch spam, but it does trigger in bad spots.
-    if (cur < 0 && bestScore >= 0.5 && bestScore - cur >= 1.5 && bestSlot > 0) return bestSlot;
-    return null;
+    return bestSlot > 0 ? bestSlot : null;
   }
 
   /** Hook for subclasses to push a leading note before per-slot choices are made. */
