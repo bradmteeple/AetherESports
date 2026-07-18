@@ -45,13 +45,20 @@ const esc = (s: string) => s.replace(/"/g, "'"); // keep labels safe inside quot
 const L = (s: string) => `"${esc(s)}"`;
 
 export function planToMermaid(p: PlanData): string {
-  const bring = p.selection.length ? p.selection.join(", ") : "your best four";
+  // Guard against a plan shape missing fields (e.g. from an older encoded link).
+  const selection = p.selection ?? [];
+  const threats = p.threats ?? [];
+  const vsRedLeads = p.vsRedLeads ?? [];
+  const lead = p.lead ?? { mons: [] as string[], reason: "" };
+  const winCondition = p.winCondition ?? "Trade efficiently and keep more Pokémon on the board.";
+
+  const bring = selection.length ? selection.join(", ") : "your best four";
   const leadTxt = p.bestLead?.mons.length
     ? p.bestLead.mons.join(" + ")
-    : p.lead.mons.join(" + ") || "your two strongest";
+    : lead.mons.join(" + ") || "your two strongest";
   const leadWin = p.bestLead ? ` — wins ${p.bestLead.winPct}% (${p.bestLead.games} games)` : "";
-  const threatList = p.threats.length
-    ? p.threats.map((t) => `${t.species}${t.move ? ` (${t.move})` : ""}`).join(" · ")
+  const threatList = threats.length
+    ? threats.map((t) => `${t.species}${t.move ? ` (${t.move})` : ""}`).join(" · ")
     : "the opponent's biggest attacker";
   const speedTool = p.archetype === "Tempo" ? "your speed control" : p.archetype;
 
@@ -60,12 +67,12 @@ export function planToMermaid(p: PlanData): string {
   n.push(
     `  Bring[${L(`Bring these 4:<br/>${bring}<br/>(${p.selectionWinPct}% win rate over ${p.selectionGames} games)`)}] --> Lead`
   );
-  n.push(`  Lead[${L(`Lead: ${leadTxt}${leadWin}<br/>${p.lead.reason}`)}]`);
+  n.push(`  Lead[${L(`Lead: ${leadTxt}${leadWin}<br/>${lead.reason}`)}]`);
 
-  if (p.vsRedLeads.length) {
+  if (vsRedLeads.length) {
     n.push(`  Lead --> RedLead`);
     n.push(`  RedLead{${L("Read Red's lead")}}`);
-    p.vsRedLeads.forEach((r, i) => {
+    vsRedLeads.forEach((r, i) => {
       n.push(`  RedLead -->|${L(`${r.lead.join(" + ")} — Blue ${r.winPct}%`)}| RL${i}`);
       n.push(`  RL${i}[${L(r.response)}] --> Turn`);
     });
@@ -93,26 +100,30 @@ export function planToMermaid(p: PlanData): string {
 }
 
 export function planToBullets(p: PlanData): string[] {
+  const selection = p.selection ?? [];
+  const threats = p.threats ?? [];
+  const vsRedLeads = p.vsRedLeads ?? [];
+  const lead = p.lead ?? { mons: [] as string[], reason: "" };
   const out: string[] = [];
-  out.push(`Game plan: ${p.winCondition}`);
-  if (p.selection.length) {
+  out.push(`Game plan: ${p.winCondition ?? "Trade efficiently and keep more Pokémon on the board."}`);
+  if (selection.length) {
     out.push(
-      `Bring ${p.selection.join(", ")} — your best selection at a ${p.selectionWinPct}% win rate over ${p.selectionGames.toLocaleString()} games.`
+      `Bring ${selection.join(", ")} — your best selection at a ${p.selectionWinPct}% win rate over ${p.selectionGames.toLocaleString()} games.`
     );
   }
   if (p.bestLead?.mons.length) {
     out.push(
       `Lead ${p.bestLead.mons.join(" + ")} — Blue's strongest lead at ${p.bestLead.winPct}% over ${p.bestLead.games.toLocaleString()} games.`
     );
-  } else if (p.lead.mons.length) {
-    out.push(`Lead ${p.lead.mons.join(" + ")}: ${p.lead.reason}`);
+  } else if (lead.mons.length) {
+    out.push(`Lead ${lead.mons.join(" + ")}: ${lead.reason}`);
   }
-  for (const r of p.vsRedLeads) {
+  for (const r of vsRedLeads) {
     out.push(`vs Red's ${r.lead.join(" + ")} (Blue ${r.winPct}% over ${r.games.toLocaleString()}): ${r.response}`);
   }
-  if (p.threats.length) {
+  if (threats.length) {
     out.push(
-      `Prioritize KO-ing ${p.threats.map((t) => `${t.species}${t.move ? ` (${t.move})` : ""}`).join(", ")} — the threats Blue learned hurt most.`
+      `Prioritize KO-ing ${threats.map((t) => `${t.species}${t.move ? ` (${t.move})` : ""}`).join(", ")} — the threats Blue learned hurt most.`
     );
   }
   out.push("Every turn: threats first, then guaranteed KOs, then speed control, then tempo tools, else max damage.");
@@ -129,8 +140,35 @@ export function encodePlan(p: PlanData): string {
 export function decodePlan(s: string): PlanData | null {
   try {
     const json = decodeURIComponent(escape(atob(decodeURIComponent(s))));
-    return JSON.parse(json) as PlanData;
+    return normalizePlan(JSON.parse(json));
   } catch {
     return null;
   }
+}
+
+// Backfill every field so a plan encoded by an older version (missing winCondition / bestLead /
+// vsRedLeads, etc.) still renders instead of crashing the page.
+function normalizePlan(p: any): PlanData {
+  const arr = <T,>(v: any): T[] => (Array.isArray(v) ? v : []);
+  const archetype: PlanData["archetype"] =
+    p?.archetype === "Trick Room" || p?.archetype === "Tailwind" ? p.archetype : "Tempo";
+  return {
+    blueTeam: p?.blueTeam ?? "Blue",
+    redTeam: p?.redTeam ?? "Red",
+    games: p?.games ?? 0,
+    blueWins: p?.blueWins ?? 0,
+    redWins: p?.redWins ?? 0,
+    winPct: p?.winPct ?? 0,
+    archetype,
+    winCondition:
+      p?.winCondition ??
+      "Trade efficiently — remove Red's biggest threats and keep more Pokémon on the board.",
+    selection: arr<string>(p?.selection),
+    selectionWinPct: p?.selectionWinPct ?? 0,
+    selectionGames: p?.selectionGames ?? 0,
+    lead: p?.lead && Array.isArray(p.lead.mons) ? p.lead : { mons: [], reason: "" },
+    bestLead: p?.bestLead && Array.isArray(p.bestLead.mons) ? p.bestLead : null,
+    vsRedLeads: arr<RedLeadPlan>(p?.vsRedLeads),
+    threats: arr<PlanThreat>(p?.threats),
+  };
 }
