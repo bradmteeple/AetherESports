@@ -1,0 +1,12 @@
+__pycache__
+build/
+.venv/
+venv/
+env/
+*.egg-info
+profile.prof
+
+battle_logs/
+results*/
+trajs/
+debug*.log
