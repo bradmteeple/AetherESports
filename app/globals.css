@@ -1029,3 +1029,72 @@ body {
     margin-bottom: 1rem;
   }
 }
+
+/* ---------- Auto Battle (headless AI vs AI) ---------- */
+.auto-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 1.5rem 0;
+}
+
+.auto-status {
+  color: #8b96c8;
+  font-size: 0.9rem;
+  font-variant: small-caps;
+  letter-spacing: 0.03em;
+}
+
+.auto-status--on {
+  color: #00e0ff;
+}
+
+.auto-scoreboard {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 1rem;
+  margin-top: 0.5rem;
+}
+
+.auto-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 1.1rem 1rem;
+  background: rgba(10, 15, 36, 0.6);
+  border: 1px solid rgba(123, 91, 255, 0.3);
+  border-radius: 12px;
+  text-align: center;
+}
+
+.auto-stat--blue {
+  border-color: rgba(0, 224, 255, 0.5);
+}
+
+.auto-stat--red {
+  border-color: rgba(255, 78, 205, 0.45);
+}
+
+.auto-stat-label {
+  color: #aeb8e8;
+  font-size: 0.85rem;
+}
+
+.auto-stat-value {
+  font-size: 1.9rem;
+  font-weight: 700;
+  color: #f5f7ff;
+  font-variant-numeric: tabular-nums;
+}
+
+.auto-stat-sub {
+  color: #8b96c8;
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.auto-note {
+  margin-top: 1.25rem;
+  color: #8b96c8;
+  font-size: 0.9rem;
+}
