@@ -40,6 +40,7 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.policies import BasePolicy
 
 from vgc_bench.src.policy import MaskedActorCriticPolicy
+from vgc_bench.src.switch_logic import pick_switch_actions
 from vgc_bench.src.teams import RandomTeamBuilder
 from vgc_bench.src.utils import (
     abilities,
@@ -70,6 +71,7 @@ class PolicyPlayer(Player):
         accept_all_formats: bool = False,
         deterministic: bool = False,
         blunder: float = 0.0,
+        switch_heuristic: bool = False,
         invitee: str | None = None,
         *args: Any,
         **kwargs: Any,
@@ -88,6 +90,9 @@ class PolicyPlayer(Player):
             blunder: Probability in [0, 1] of ignoring the policy on a given
                 turn and playing a uniformly random legal move instead. Used to
                 weaken the agent for lower difficulty levels; 0.0 disables it.
+            switch_heuristic: If True, layer a conservative rule-based switch
+                override on the policy so the agent switches out of clearly bad
+                type matchups instead of always staying in.
             *args: Additional arguments for Player base class.
             **kwargs: Additional keyword arguments for Player base class.
         """
@@ -96,6 +101,7 @@ class PolicyPlayer(Player):
         self._accept_all_formats = accept_all_formats
         self.deterministic = deterministic
         self.blunder = blunder
+        self.switch_heuristic = switch_heuristic
         self.invitee = invitee
 
     async def _handle_challenge_request(self, split_message: list[str]):
@@ -240,6 +246,24 @@ class PolicyPlayer(Player):
                 obs_dict, deterministic=self.deterministic
             )
         action = action.cpu().numpy()[0]
+        return self._to_order(action, battle)
+
+    def _to_order(
+        self, action: npt.NDArray[np.int64], battle: DoubleBattle
+    ) -> BattleOrder:
+        """
+        Convert a per-slot action into an order, applying the switch heuristic.
+
+        When ``switch_heuristic`` is enabled, a bad-matchup active is switched
+        out before ordering. Any failure falls back to the unmodified policy
+        action, so the override can never break move selection.
+        """
+        if self.switch_heuristic:
+            try:
+                switched = pick_switch_actions(battle, action)
+                return DoublesEnv.action_to_order(switched, battle)
+            except Exception:
+                pass
         return DoublesEnv.action_to_order(action, battle)
 
     def teampreview(self, battle: AbstractBattle) -> str | Awaitable[str]:
@@ -565,7 +589,7 @@ class BatchPolicyPlayer(PolicyPlayer):
         await req.event.wait()
         assert req.result is not None
         action = req.result
-        return DoublesEnv.action_to_order(action, battle)
+        return self._to_order(action, battle)
 
     def teampreview(self, battle: AbstractBattle) -> Awaitable[str]:
         """Return an awaitable that resolves to the team order string."""

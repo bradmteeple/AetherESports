@@ -124,6 +124,8 @@ python -m vgc_bench.play --username <name> --reg mb --level 3
 
 The strength tiers are defined in [vgc_bench/src/levels.py](vgc_bench/src/levels.py) (`Level`, `LEVEL_CONFIGS`, `make_opponent`) so other entry points can build a tiered opponent with one call. Level weakening reuses existing mechanisms only: player class (heuristic vs policy), the `deterministic` flag, a `blunder` rate (random-legal move probability, implemented via poke-env's `choose_random_move`), and team quality (`prefer_featured`).
 
+**Switching.** The policy tiers (2 and 3) also run a conservative rule-based switch override ([vgc_bench/src/switch_logic.py](vgc_bench/src/switch_logic.py)): when an active Pokemon is under a clearly super-effective type threat and a distinctly better, *legal* switch-in is on the bench, the bot switches out instead of always staying in. It only fires on a clear improvement and only to a switch poke-env already reports as legal, so it never makes an illegal move; on any doubt it defers to the policy's choice.
+
 ### Self-improving Level 3 (learns from your games)
 
 Level 3 is designed to get **stronger the more you play it**, by learning to exploit how *you* play. It always loads the newest checkpoint in its saves directory, so appending stronger checkpoints between sessions makes the opponent you face next tuned to counter your tendencies.

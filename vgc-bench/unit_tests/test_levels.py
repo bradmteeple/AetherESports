@@ -58,6 +58,12 @@ class TestLevelConfigs:
         assert cfg.blunder == 0.0
         assert cfg.prefer_featured is True
 
+    def test_policy_levels_use_switch_heuristic(self):
+        # The learned policy tends to stay in; the rule-based switch override is
+        # enabled for the policy-backed tiers so they switch bad matchups out.
+        assert LEVEL_CONFIGS[Level.TWO].switch_heuristic is True
+        assert LEVEL_CONFIGS[Level.THREE].switch_heuristic is True
+
     def test_policy_levels_get_stronger_with_level(self):
         # Level 1 is a rule-based heuristic (its weakness is being rule-based,
         # not the blunder field). Among the policy-backed levels, a higher level

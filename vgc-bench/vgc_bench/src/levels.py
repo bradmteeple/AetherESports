@@ -60,6 +60,8 @@ class LevelConfig:
             on a given turn (weakens the agent). 0.0 disables it.
         prefer_featured: Whether to draw teams from the curated ``featured/``
             pool when it exists.
+        switch_heuristic: For policy players, whether to layer the rule-based
+            switch override so the agent switches out of bad matchups.
         description: Short human-readable summary of how this level plays.
     """
 
@@ -67,6 +69,7 @@ class LevelConfig:
     deterministic: bool
     blunder: float
     prefer_featured: bool
+    switch_heuristic: bool
     description: str
 
 
@@ -76,6 +79,7 @@ LEVEL_CONFIGS: dict[Level, LevelConfig] = {
         deterministic=False,
         blunder=0.0,
         prefer_featured=False,
+        switch_heuristic=False,
         description="Rule-based SimpleHeuristics opponent: solid fundamentals, exploitable.",
     ),
     Level.TWO: LevelConfig(
@@ -83,6 +87,7 @@ LEVEL_CONFIGS: dict[Level, LevelConfig] = {
         deterministic=False,
         blunder=0.05,
         prefer_featured=False,
+        switch_heuristic=True,
         description="Trained policy, sampled stochastically with occasional slips.",
     ),
     Level.THREE: LevelConfig(
@@ -90,6 +95,7 @@ LEVEL_CONFIGS: dict[Level, LevelConfig] = {
         deterministic=True,
         blunder=0.0,
         prefer_featured=True,
+        switch_heuristic=True,
         description="Trained policy at full strength on meta teams; self-improving.",
     ),
 }
@@ -224,7 +230,10 @@ def make_opponent(
         return SimpleHeuristicsPlayer(**common)
 
     player = PolicyPlayer(
-        deterministic=cfg.deterministic, blunder=cfg.blunder, **common
+        deterministic=cfg.deterministic,
+        blunder=cfg.blunder,
+        switch_heuristic=cfg.switch_heuristic,
+        **common,
     )
     checkpoint = _resolve_or_download_checkpoint(
         results_path, method, reg, num_teams, run_id
