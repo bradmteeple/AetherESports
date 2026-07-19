@@ -57,16 +57,23 @@ export function describeLine(line: string, board: BoardState): string | null {
   const parts = line.slice(1).split("|");
   const cmd = parts[0];
 
-  const setActive = (identRaw: string, cond?: string) => {
-    const { side, slot, name } = parseIdent(identRaw);
+  // A mon's display name is its true forme, taken from the protocol DETAILS (e.g. "Floette-Eternal")
+  // — not the IDENT nickname, which is the base species ("Floette"). Falls back to the nickname when
+  // no DETAILS are given.
+  const setActive = (identRaw: string, cond?: string, details?: string) => {
+    const { side, slot, name: nick } = parseIdent(identRaw);
+    const name = (details ? details.split(",")[0].trim() : "") || nick;
     const base: ActiveMon = { name, hpPct: 100, status: "", fainted: false, item: "", ability: "" };
     board[side][slot] = cond ? { ...base, ...parseCondition(cond) } : base;
     return { side, slot, name };
   };
   const updateHp = (identRaw: string, cond: string) => {
-    const { side, slot, name } = parseIdent(identRaw);
+    const { side, slot, name: nick } = parseIdent(identRaw);
     const c = parseCondition(cond);
     const prev = board[side][slot];
+    // Keep the on-field forme/Mega name (set at switch-in or detailschange); an HP update must not
+    // reset it back to the base-species nickname.
+    const name = prev?.name ?? nick;
     board[side][slot] = {
       name,
       item: prev?.item ?? "",
@@ -76,6 +83,11 @@ export function describeLine(line: string, board: BoardState): string | null {
       fainted: c.fainted,
     };
     return { side, slot, name, ...c };
+  };
+  // The name to show for a mon referenced by a log line: its current on-field forme, if known.
+  const nameOf = (identRaw: string) => {
+    const { side, slot, name } = parseIdent(identRaw);
+    return board[side]?.[slot]?.name ?? name;
   };
 
   switch (cmd) {
@@ -92,12 +104,12 @@ export function describeLine(line: string, board: BoardState): string | null {
       return null;
     case "switch":
     case "drag": {
-      const { side, name } = setActive(parts[1], parts[3]);
+      const { side, name } = setActive(parts[1], parts[3], parts[2]);
       const verb = cmd === "drag" ? "was dragged out" : "sent out";
       return side === "p1" ? `You ${verb} ${name}!` : `Foe ${verb} ${name}!`;
     }
     case "replace": {
-      const { side, name } = setActive(parts[1], parts[3]);
+      const { side, name } = setActive(parts[1], parts[3], parts[2]);
       return `${who(side)} ${name} was revealed!`;
     }
     case "swap": {
@@ -121,11 +133,13 @@ export function describeLine(line: string, board: BoardState): string | null {
       return null;
     }
     case "-mega": {
-      const { side, name } = parseIdent(parts[1]);
+      const { side } = parseIdent(parts[1]);
+      const name = nameOf(parts[1]);
       return `${side === "p1" ? name : "Foe " + name} Mega Evolved!`;
     }
     case "move": {
-      const { side, name } = parseIdent(parts[1]);
+      const { side } = parseIdent(parts[1]);
+      const name = nameOf(parts[1]);
       return `${side === "p1" ? name : "Foe " + name} used ${parts[2]}!`;
     }
     case "-damage": {
@@ -138,13 +152,15 @@ export function describeLine(line: string, board: BoardState): string | null {
       return `${who(side)} ${name} restored HP (${hpPct}%).`;
     }
     case "faint": {
-      const { side, slot, name } = parseIdent(parts[1]);
+      const { side, slot } = parseIdent(parts[1]);
+      const name = nameOf(parts[1]);
       const prev = board[side][slot];
       if (prev) board[side][slot] = { ...prev, hpPct: 0, fainted: true, status: "fnt" };
       return `${who(side)} ${name} fainted!`;
     }
     case "-status": {
-      const { side, slot, name } = parseIdent(parts[1]);
+      const { side, slot } = parseIdent(parts[1]);
+      const name = nameOf(parts[1]);
       if (board[side][slot]) board[side][slot] = { ...board[side][slot]!, status: parts[2] };
       const label: Record<string, string> = {
         brn: "was burned", par: "was paralyzed", psn: "was poisoned",
@@ -153,7 +169,8 @@ export function describeLine(line: string, board: BoardState): string | null {
       return `${who(side)} ${name} ${label[parts[2]] ?? "was afflicted with " + parts[2]}!`;
     }
     case "-curestatus": {
-      const { side, slot, name } = parseIdent(parts[1]);
+      const { side, slot } = parseIdent(parts[1]);
+      const name = nameOf(parts[1]);
       if (board[side][slot]) board[side][slot] = { ...board[side][slot]!, status: "" };
       return `${who(side)} ${name} recovered.`;
     }
@@ -162,39 +179,45 @@ export function describeLine(line: string, board: BoardState): string | null {
     case "-resisted":
       return "It's not very effective...";
     case "-immune": {
-      const { side, name } = parseIdent(parts[1]);
+      const { side } = parseIdent(parts[1]);
+      const name = nameOf(parts[1]);
       return `It doesn't affect ${side === "p1" ? "your" : "the foe's"} ${name}...`;
     }
     case "-crit":
       return "A critical hit!";
     case "-miss": {
-      const { side, name } = parseIdent(parts[1] || "");
-      return parts[1] ? `${who(side)} ${name}'s attack missed!` : "The attack missed!";
+      const { side } = parseIdent(parts[1] || "");
+      return parts[1] ? `${who(side)} ${nameOf(parts[1])}'s attack missed!` : "The attack missed!";
     }
     case "-fail":
       return "But it failed!";
     case "-terastallize": {
-      const { side, name } = parseIdent(parts[1]);
+      const { side } = parseIdent(parts[1]);
+      const name = nameOf(parts[1]);
       return `${who(side)} ${name} Terastallized into ${parts[2]}!`;
     }
     case "-boost":
     case "-unboost": {
-      const { side, name } = parseIdent(parts[1]);
+      const { side } = parseIdent(parts[1]);
+      const name = nameOf(parts[1]);
       const dir = cmd === "-boost" ? "rose" : "fell";
       const amt = parseInt(parts[3], 10) > 1 ? " sharply" : "";
       return `${who(side)} ${name}'s ${statName(parts[2])} ${dir}${amt}!`;
     }
     case "-ability": {
-      const { side, name } = parseIdent(parts[1]);
+      const { side } = parseIdent(parts[1]);
+      const name = nameOf(parts[1]);
       return `[${who(side)} ${name}'s ${parts[2]}]`;
     }
     case "-item": {
-      const { side, slot, name } = parseIdent(parts[1]);
+      const { side, slot } = parseIdent(parts[1]);
+      const name = nameOf(parts[1]);
       if (board[side][slot]) board[side][slot] = { ...board[side][slot]!, item: parts[2] };
       return `${who(side)} ${name}'s ${parts[2]} activated.`;
     }
     case "-enditem": {
-      const { side, name } = parseIdent(parts[1]);
+      const { side } = parseIdent(parts[1]);
+      const name = nameOf(parts[1]);
       return `${who(side)} ${name}'s ${parts[2]} was used up.`;
     }
     case "-weather":
@@ -210,11 +233,13 @@ export function describeLine(line: string, board: BoardState): string | null {
     case "-activate":
       return parts[2] ? `${cleanEffect(parts[2])} activated.` : null;
     case "-start": {
-      const { side, name } = parseIdent(parts[1]);
+      const { side } = parseIdent(parts[1]);
+      const name = nameOf(parts[1]);
       return `${who(side)} ${name}: ${cleanEffect(parts[2])}.`;
     }
     case "cant": {
-      const { side, name } = parseIdent(parts[1]);
+      const { side } = parseIdent(parts[1]);
+      const name = nameOf(parts[1]);
       return `${who(side)} ${name} couldn't move!`;
     }
     case "turn":
