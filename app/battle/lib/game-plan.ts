@@ -8,6 +8,17 @@ export interface PlanThreat {
   move: string; // the strongest move Blue saw it use
 }
 
+// One decision branch off the lead: "IF <Red threat> is the danger → run this game plan".
+// There should be one of these per MAJOR THREAT, and the flowchart adds an extra "else" branch
+// for when no priority threat is up (or Red simply misplays).
+export interface ThreatPlan {
+  species: string; // the Red threat this branch answers
+  move: string; // its strongest seen move (what to watch out for)
+  answer: string; // the Blue Pokémon that best checks it
+  answerFromBack: boolean; // true if that answer sits in the back and must be switched in
+  plan: string; // the game plan for this branch, written to account for the back line
+}
+
 export interface LeadStat {
   mons: string[]; // the two Pokémon led
   winPct: number; // Blue's win rate with / against this lead
@@ -34,9 +45,11 @@ export interface PlanData {
   selectionWinPct: number;
   selectionGames: number;
   lead: { mons: string[]; reason: string }; // suggested lead + why (from team shape)
+  back: string[]; // the brought Pokémon held in reserve (selection minus the lead)
   bestLead: LeadStat | null; // Blue's highest win-rate lead in the data
   vsRedLeads: RedLeadPlan[]; // what to do against Red's most common leads
   threats: PlanThreat[];
+  threatPlans: ThreatPlan[]; // one branch per major threat (drives the branching flowchart)
 }
 
 // ---- Rendering (pure) ------------------------------------------------------------------------
@@ -44,65 +57,68 @@ export interface PlanData {
 const esc = (s: string) => s.replace(/"/g, "'"); // keep labels safe inside quoted mermaid nodes
 const L = (s: string) => `"${esc(s)}"`;
 
+// A branching game-plan flowchart: the lead/back sit at the top, and one branch fans out per
+// MAJOR THREAT — "IF <threat> is the danger → run this plan (accounting for the back)" — plus an
+// "else" branch for when no priority threat is up or Red simply misplays. This mirrors the
+// hand-drawn scenario tree: as many branches from the lead as there are major threats, plus one.
 export function planToMermaid(p: PlanData): string {
   // Guard against a plan shape missing fields (e.g. from an older encoded link).
   const selection = p.selection ?? [];
-  const threats = p.threats ?? [];
-  const vsRedLeads = p.vsRedLeads ?? [];
   const lead = p.lead ?? { mons: [] as string[], reason: "" };
+  const back = p.back ?? [];
+  const threatPlans = p.threatPlans ?? [];
+  const threats = p.threats ?? [];
   const winCondition = p.winCondition ?? "Trade efficiently and keep more Pokémon on the board.";
 
-  const bring = selection.length ? selection.join(", ") : "your best four";
-  const leadTxt = p.bestLead?.mons.length
-    ? p.bestLead.mons.join(" + ")
-    : lead.mons.join(" + ") || "your two strongest";
-  const leadWin = p.bestLead ? ` — wins ${p.bestLead.winPct}% (${p.bestLead.games} games)` : "";
-  const threatList = threats.length
-    ? threats.map((t) => `${t.species}${t.move ? ` (${t.move})` : ""}`).join(" · ")
-    : "the opponent's biggest attacker";
-  const speedTool = p.archetype === "Tempo" ? "your speed control" : p.archetype;
+  const leadTxt = lead.mons.length ? lead.mons.join(" + ") : "your two strongest";
+  const backTxt = back.length
+    ? back.join(" + ")
+    : selection.filter((s) => !lead.mons.includes(s)).join(" + ") || "your other two";
+  const speedTool = p.archetype === "Tempo" ? "your speed control / tempo tools" : p.archetype;
+
+  // Fall back to the raw threat list if per-threat plans weren't computed (older encoded links).
+  const branches: ThreatPlan[] = threatPlans.length
+    ? threatPlans
+    : threats.map((t) => ({
+        species: t.species,
+        move: t.move,
+        answer: "",
+        answerFromBack: false,
+        plan: `Gang up and KO ${t.species}${t.move ? ` (watch ${t.move})` : ""} before it moves, then bring your back to clean up.`,
+      }));
 
   const n: string[] = ["flowchart TD"];
-  n.push(`  WC([${L(`Win condition:<br/>${p.winCondition}`)}]) --> Bring`);
+
+  // Root: the lead and the back you're holding in reserve (the "Insert Mons" boxes in the sketch).
   n.push(
-    `  Bring[${L(`Bring these 4:<br/>${bring}<br/>(${p.selectionWinPct}% win rate over ${p.selectionGames} games)`)}] --> Lead`
+    `  Lead[${L(`Lead: ${leadTxt}<br/>Back: ${backTxt}<br/>Win condition: ${winCondition}`)}]`
   );
-  n.push(`  Lead[${L(`Lead: ${leadTxt}${leadWin}<br/>${lead.reason}`)}]`);
 
-  if (vsRedLeads.length) {
-    n.push(`  Lead --> RedLead`);
-    n.push(`  RedLead{${L("Read Red's lead")}}`);
-    vsRedLeads.forEach((r, i) => {
-      n.push(`  RedLead -->|${L(`${r.lead.join(" + ")} — Blue ${r.winPct}%`)}| RL${i}`);
-      n.push(`  RL${i}[${L(r.response)}] --> Turn`);
-    });
-    n.push(`  RedLead -->|${L("anything else")}| Turn`);
-  } else {
-    n.push(`  Lead --> Turn`);
-  }
+  // One branch per major threat: Lead -> IF(threat) decision -> its game plan (accounts for back).
+  branches.forEach((t, i) => {
+    const cond = `IF ${t.species}${t.move ? ` (${t.move})` : ""}<br/>is the biggest threat`;
+    n.push(`  Lead --> IF${i}`);
+    n.push(`  IF${i}{${L(cond)}}`);
+    n.push(`  IF${i} --> GP${i}`);
+    n.push(`  GP${i}[${L(`Game plan ${i + 1}:<br/>${t.plan}`)}]`);
+  });
 
-  n.push(`  Turn{{${L("General plan — each turn, in order")}}} --> Q1`);
-  n.push(`  Q1{${L(`Is a top Red threat on the field?<br/>${threatList}`)}}`);
-  n.push(`  Q1 -->|Yes| A1[${L("Gang up and KO it first — best super-effective move from both slots")}]`);
-  n.push(`  Q1 -->|No| Q2`);
-  n.push(`  Q2{${L("Can you secure a KO this turn?")}}`);
-  n.push(`  Q2 -->|Yes| A2[${L("Take the KO — remove the most dangerous target first")}]`);
-  n.push(`  Q2 -->|No| Q3`);
-  n.push(`  Q3{${L(`Behind on speed with ${speedTool} available?`)}}`);
-  n.push(`  Q3 -->|Yes| A3[${L(`Set ${speedTool} to flip the speed war in your favor`)}]`);
-  n.push(`  Q3 -->|No| Q4`);
-  n.push(`  Q4{${L("Under pressure with Protect / Fake Out / redirection up?")}}`);
-  n.push(`  Q4 -->|Yes| A4[${L("Buy tempo — Protect the threatened mon, Fake Out or redirect their key attacker")}]`);
-  n.push(`  Q4 -->|No| A5[${L("Otherwise: deal the most damage to the most dangerous target")}]`);
-  for (const a of ["A1", "A2", "A3", "A4", "A5"]) n.push(`  ${a} --> Loop`);
-  n.push(`  Loop([${L("Repeat until the last Red Pokémon faints")}])`);
+  // The extra "else" branch — no priority threat up, or Red misplays: run the general plan.
+  n.push(`  Lead --> IFelse`);
+  n.push(`  IFelse{${L("Else — no major threat up,<br/>or Red misplays")}}`);
+  n.push(`  IFelse --> GPelse`);
+  n.push(
+    `  GPelse[${L(
+      `General game plan:<br/>${winCondition}<br/>Take guaranteed KOs, lean on ${speedTool}, and deal the most damage to Red's most dangerous mon while keeping your back healthy.`
+    )}]`
+  );
   return n.join("\n");
 }
 
 export function planToBullets(p: PlanData): string[] {
   const selection = p.selection ?? [];
-  const threats = p.threats ?? [];
-  const vsRedLeads = p.vsRedLeads ?? [];
+  const back = p.back ?? [];
+  const threatPlans = p.threatPlans ?? [];
   const lead = p.lead ?? { mons: [] as string[], reason: "" };
   const out: string[] = [];
   out.push(`Game plan: ${p.winCondition ?? "Trade efficiently and keep more Pokémon on the board."}`);
@@ -111,22 +127,23 @@ export function planToBullets(p: PlanData): string[] {
       `Bring ${selection.join(", ")} — your best selection at a ${p.selectionWinPct}% win rate over ${p.selectionGames.toLocaleString()} games.`
     );
   }
+  if (lead.mons.length) {
+    const backTxt = back.length ? `, hold ${back.join(" + ")} in reserve` : "";
+    out.push(`Lead ${lead.mons.join(" + ")}${backTxt}: ${lead.reason}`);
+  }
   if (p.bestLead?.mons.length) {
     out.push(
-      `Lead ${p.bestLead.mons.join(" + ")} — Blue's strongest lead at ${p.bestLead.winPct}% over ${p.bestLead.games.toLocaleString()} games.`
-    );
-  } else if (lead.mons.length) {
-    out.push(`Lead ${lead.mons.join(" + ")}: ${lead.reason}`);
-  }
-  for (const r of vsRedLeads) {
-    out.push(`vs Red's ${r.lead.join(" + ")} (Blue ${r.winPct}% over ${r.games.toLocaleString()}): ${r.response}`);
-  }
-  if (threats.length) {
-    out.push(
-      `Prioritize KO-ing ${threats.map((t) => `${t.species}${t.move ? ` (${t.move})` : ""}`).join(", ")} — the threats Blue learned hurt most.`
+      `Best lead in the data: ${p.bestLead.mons.join(" + ")} at ${p.bestLead.winPct}% over ${p.bestLead.games.toLocaleString()} games.`
     );
   }
-  out.push("Every turn: threats first, then guaranteed KOs, then speed control, then tempo tools, else max damage.");
+  // One line per threat branch — this is the heart of the branching plan.
+  for (let i = 0; i < threatPlans.length; i++) {
+    const t = threatPlans[i];
+    out.push(`Branch ${i + 1} — IF ${t.species}${t.move ? ` (${t.move})` : ""} is the danger: ${t.plan}`);
+  }
+  out.push(
+    "Else (no major threat up, or Red misplays): take guaranteed KOs, use your speed control, and keep more Pokémon on the board."
+  );
   return out;
 }
 
@@ -167,8 +184,10 @@ function normalizePlan(p: any): PlanData {
     selectionWinPct: p?.selectionWinPct ?? 0,
     selectionGames: p?.selectionGames ?? 0,
     lead: p?.lead && Array.isArray(p.lead.mons) ? p.lead : { mons: [], reason: "" },
+    back: arr<string>(p?.back),
     bestLead: p?.bestLead && Array.isArray(p.bestLead.mons) ? p.bestLead : null,
     vsRedLeads: arr<RedLeadPlan>(p?.vsRedLeads),
     threats: arr<PlanThreat>(p?.threats),
+    threatPlans: arr<ThreatPlan>(p?.threatPlans),
   };
 }

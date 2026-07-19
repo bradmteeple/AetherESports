@@ -5,7 +5,7 @@
 
 import "./node-shim"; // must precede any @pkmn import
 import { Dex, Teams, toID } from "@pkmn/sim";
-import type { PlanData, PlanThreat, RedLeadPlan } from "./game-plan";
+import type { PlanData, PlanThreat, RedLeadPlan, ThreatPlan } from "./game-plan";
 
 type Book = Record<string, Record<string, number>>;
 type Stat = { combo: string; games: number; wins: number };
@@ -118,6 +118,56 @@ function bestStat(stats: Stat[]): Stat | null {
   return sampled[0] ?? stats.slice().sort((a, b) => b.games - a.games)[0] ?? null;
 }
 
+// The Blue mon that best checks a given Red threat: the one whose best attacking type is most
+// super-effective into it, falling back to the hardest hitter when nothing is super-effective.
+function bestAnswer(threatName: string, pool: MonInfo[]): MonInfo | null {
+  const redTypes = Dex.species.get(threatName).types ?? [];
+  let best: MonInfo | null = null;
+  let bestMult = 1;
+  for (const m of pool) {
+    const mult = m.types.reduce((mx, t) => Math.max(mx, typeEff(t, redTypes)), 0);
+    if (mult > bestMult) ((bestMult = mult), (best = m));
+  }
+  return best ?? pool.slice().sort((a, b) => b.offense - a.offense)[0] ?? null;
+}
+
+// Build one branch of the flowchart: how Blue answers a specific major threat while accounting
+// for the back line (which reserve mon to bring, and what to hold for the win condition).
+function threatToPlan(
+  threat: PlanThreat,
+  pool: MonInfo[],
+  leadIds: Set<string>,
+  back: string[],
+  archetype: PlanData["archetype"]
+): ThreatPlan {
+  const answer = bestAnswer(threat.species, pool);
+  const answerName = answer?.species ?? "";
+  const answerFromBack = answer ? !leadIds.has(toID(answer.species)) : false;
+  const reserve = back.filter((n) => toID(n) !== toID(answerName));
+
+  const speed =
+    archetype === "Trick Room"
+      ? "Keep Trick Room up so your slow hitters still move first."
+      : archetype === "Tailwind"
+      ? "Keep Tailwind up to stay ahead on speed."
+      : "Lean on your speed control / tempo tools to move first.";
+  const open = answerName
+    ? `${answerFromBack ? `Switch ${answerName} in from the back` : `${answerName} stays in`} and gang up to KO ${threat.species}`
+    : `Gang up and KO ${threat.species}`;
+  const watch = threat.move ? ` (watch ${threat.move})` : "";
+  const reserveTxt = reserve.length
+    ? ` Hold ${reserve.join(" + ")} in reserve as your win condition.`
+    : "";
+
+  return {
+    species: threat.species,
+    move: threat.move,
+    answer: answerName,
+    answerFromBack,
+    plan: `${open}${watch} before it moves. ${speed}${reserveTxt}`,
+  };
+}
+
 export function analyzeBluePlan(a: AnalyzeArgs): PlanData {
   const decided = a.blueWins + a.redWins;
   const winPct = decided ? Math.round((a.blueWins / decided) * 100) : 0;
@@ -175,6 +225,15 @@ export function analyzeBluePlan(a: AnalyzeArgs): PlanData {
   const threats: PlanThreat[] = threatsRaw.slice(0, 3).map((t) => ({ species: t.species, move: t.move }));
   const threatIds = new Set(threatsRaw.slice(0, 4).map((t) => t.id));
 
+  // The back line: the brought Pokémon that aren't in the suggested lead.
+  const leadIds = new Set(lead.mons.map((n) => toID(n)));
+  const back = selection.filter((n) => !leadIds.has(toID(n)));
+
+  // One flowchart branch per major threat (up to 4), each written to account for the back line.
+  const threatPlans: ThreatPlan[] = threatsRaw
+    .slice(0, 4)
+    .map((t) => threatToPlan({ species: t.species, move: t.move }, pool, leadIds, back, archetype));
+
   // Blue's best-performing lead.
   const bl = bestStat(a.blueLeads);
   const bestLead =
@@ -209,8 +268,10 @@ export function analyzeBluePlan(a: AnalyzeArgs): PlanData {
     selectionWinPct,
     selectionGames,
     lead,
+    back,
     bestLead,
     vsRedLeads,
     threats,
+    threatPlans,
   };
 }
