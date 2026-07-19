@@ -1146,62 +1146,44 @@ body {
   color: #00e0ff;
 }
 
-.auto-power {
+/* "Thinking" indicator shown while the Monte Carlo search runs. */
+.auto-thinking {
   display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  max-width: 560px;
-  margin: 0 auto 1.25rem;
-}
-
-.auto-power-row {
-  display: grid;
-  grid-template-columns: 1fr 2fr auto;
   align-items: center;
+  justify-content: center;
   gap: 0.6rem;
-}
-
-.auto-power-label {
-  font-size: 0.8rem;
-  text-align: right;
-  color: #aeb8e8;
-}
-
-.auto-power-row--blue .auto-power-label {
-  color: #00e0ff;
-}
-
-.auto-power-row--red .auto-power-label {
-  color: #ff8bd8;
-}
-
-.auto-power-track {
-  height: 10px;
-  border-radius: 6px;
-  background: rgba(123, 91, 255, 0.15);
+  max-width: 620px;
+  margin: 0 auto 1.25rem;
+  padding: 0.6rem 0.9rem;
+  border-radius: 10px;
+  background: rgba(123, 91, 255, 0.1);
   border: 1px solid rgba(123, 91, 255, 0.3);
-  overflow: hidden;
 }
 
-.auto-power-fill {
-  height: 100%;
-  border-radius: 6px;
-  transition: width 0.25s ease;
+.auto-thinking-dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #7b5bff;
+  animation: auto-pulse 1s ease-in-out infinite;
 }
 
-.auto-power-row--blue .auto-power-fill {
-  background: linear-gradient(90deg, rgba(0, 224, 255, 0.5), #00e0ff);
+@keyframes auto-pulse {
+  0%,
+  100% {
+    opacity: 0.3;
+    transform: scale(0.8);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.15);
+  }
 }
 
-.auto-power-row--red .auto-power-fill {
-  background: linear-gradient(90deg, rgba(255, 78, 205, 0.5), #ff8bd8);
-}
-
-.auto-power-pct {
+.auto-thinking-text {
   font-size: 0.85rem;
-  color: #e6ebff;
-  font-variant-numeric: tabular-nums;
-  min-width: 2.5rem;
+  color: #c7cff2;
   text-align: left;
 }
 

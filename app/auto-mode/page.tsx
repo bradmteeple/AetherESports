@@ -16,15 +16,16 @@ interface Replay {
 }
 
 // Blue needs a reasonable sample before its game plan is worth generating.
-const MIN_PLAN_GAMES = 50;
+const MIN_PLAN_GAMES = 20;
 
 const ZERO: Tally = {
   blue: 0,
   red: 0,
   ties: 0,
   games: 0,
-  powerBlue: 0,
-  powerRed: 0,
+  searching: false,
+  turn: 0,
+  sims: 0,
   topBlue: [],
   topRed: [],
   replayMin: null,
@@ -162,18 +163,17 @@ export default function AutoMode() {
   const decided = tally.blue + tally.red;
   const bluePct = decided ? Math.round((tally.blue / decided) * 100) : 0;
   const redPct = decided ? 100 - bluePct : 0;
-  const bluePow = Math.round(tally.powerBlue * 100);
-  const redPow = Math.round(tally.powerRed * 100);
 
   return (
     <div className="auto-page">
       <h1 className="page-title">Auto Battle</h1>
       <p className="page-text">
-        Two AIs battle in VGC 2026 Reg M-B, back-to-back at full speed. Game one is fully random;
-        after that they teach each other — the loser of each game ramps up hard and the winner a
-        little, so both only ever grow stronger (no ceiling), learning to counter the
-        opponent&apos;s threats. There&apos;s nothing to watch; it just runs and tallies, and below
-        the score each side&apos;s top 3 winning 4-of-6 selections are labeled.
+        Two AIs play VGC 2026 Reg M-B. Every decision is a Monte Carlo search that looks ahead over
+        a forked copy of the real battle simulator: it treats each simultaneous turn as a small game
+        and plays a mixed strategy, averages over the luck, and works out when to Mega Evolve on its
+        own — nothing about it is scripted. It runs deliberately slowly for accuracy, so games
+        accumulate over time. It keeps a running tally, and below the score each side&apos;s top
+        winning 4-of-6 selections are labeled.
       </p>
 
       <div className="auto-teampick">
@@ -229,7 +229,15 @@ export default function AutoMode() {
           Reset
         </button>
         <span className={"auto-status" + (running ? " auto-status--on" : "")}>
-          {running ? (loading ? "starting…" : "running…") : tally.games ? "stopped" : "idle"}
+          {running
+            ? loading
+              ? "starting…"
+              : tally.turn
+                ? `searching · turn ${tally.turn}`
+                : "thinking…"
+            : tally.games
+              ? "stopped"
+              : "idle"}
         </span>
 
         {!running && tally.replayMax != null && (
@@ -284,10 +292,16 @@ export default function AutoMode() {
         </p>
       )}
 
-      <div className="auto-power">
-        <PowerBar label={`Blue power · ${blueName}`} accent="blue" pct={bluePow} />
-        <PowerBar label={`Red power · ${redName}`} accent="red" pct={redPow} />
-      </div>
+      {running && (
+        <div className="auto-thinking">
+          <span className="auto-thinking-dot" />
+          <span className="auto-thinking-text">
+            {blueName} vs {redName} — searching {tally.sims.toLocaleString()} sims per decision
+            {tally.turn ? ` · game turn ${tally.turn}` : ""}. Games finish slowly; the tally grows as
+            they complete.
+          </span>
+        </div>
+      )}
 
       <div className="auto-scoreboard">
         <div className="auto-stat auto-stat--blue">
@@ -318,10 +332,10 @@ export default function AutoMode() {
       </div>
 
       <p className="auto-note">
-        Each side brings a random 4 of its 6 every game; the columns show that side&apos;s top 3
-        selections by win rate (with wins/games), among picks with at least 500 games so the rates
-        are meaningful. Changing a team or pressing Reset starts a new arms race (power and learning
-        back to zero).
+        The search chooses which 4 of 6 to bring, so each side converges on its strongest selections;
+        the columns show that side&apos;s top selections by win rate (with wins/games), among picks
+        with at least {MIN_GAMES} games so the rates mean something. Changing a team or pressing Reset
+        clears the tally and starts over.
       </p>
     </div>
   );
@@ -537,21 +551,8 @@ function ReplayRoster({
   );
 }
 
-function PowerBar({ label, accent, pct }: { label: string; accent: "blue" | "red"; pct: number }) {
-  return (
-    <div className={"auto-power-row auto-power-row--" + accent}>
-      <span className="auto-power-label">{label}</span>
-      <div className="auto-power-track">
-        {/* Bar fills to 100% once fully powered; the % label keeps climbing past it. */}
-        <div className="auto-power-fill" style={{ width: `${Math.min(100, pct)}%` }} />
-      </div>
-      <span className="auto-power-pct">{pct}%</span>
-    </div>
-  );
-}
-
 // A selection needs at least this many games before its win rate is trusted enough to rank.
-const MIN_GAMES = 500;
+const MIN_GAMES = 10;
 
 function WinColumn({
   title,

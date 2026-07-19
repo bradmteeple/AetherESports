@@ -1,36 +1,22 @@
-// Headless self-improving AI-vs-AI runner for the Auto Battle tab.
+// Auto Battle controller.
 //
-// Runs real Pokémon Showdown battles between two learning bots in the VGC 2026 Reg M-B format,
-// back-to-back and as fast as the engine allows ("turbo"). Nothing is rendered per turn — the
-// output is a running win/tie/games tally, each side's current "power" (skill), and, per side,
-// the top 3 *winning* 4-of-6 Team Preview selections (the four Pokémon that side brought). This
-// is deliberately separate from the interactive Battle tab's BattleController (engine.ts).
+// Two AIs play VGC 2026 Reg M-B, back to back. Each decision is made by a Monte Carlo search that
+// looks ahead over a forked copy of the real Showdown simulator (see mcts.ts): it treats the
+// simultaneous move choice as a small game and plays a MIXED strategy, averages over the RNG, and
+// weighs "Mega Evolve now vs later" as ordinary actions — nothing about Mega timing is hand-coded.
 //
-// The bots are an *arms race*: game 1 is fully random, and after every game both sides ramp up in
-// power (the loser fast, the winner slowly) — power only ever increases, with no ceiling. Power
-// drives the shared reasoning heuristic (ai.ts ReasoningAI): below 1 it mixes in random moves;
-// at/above 1 it always takes its best-scored move and keeps sharpening how hard it prioritizes
-// KO-ing the opponent's most dangerous Pokémon, learned from that opponent's move tendencies
-// across games. Team Preview is randomized (and recorded) so selections vary and can be ranked.
+// The search is heavy and deliberately runs slowly for accuracy, so the game loop lives in a Web
+// Worker (mcts-worker.ts). This controller is the main-thread client: it forwards start/stop/reset,
+// and folds each finished game the worker sends back into the running tally, the win-rate selection
+// columns, the learned opponent-threat model (for the game plan), and the replay window. Those
+// aggregates stay here so getReplay()/bluePlan() remain synchronous for the page.
 
-import "./node-shim"; // must precede any @pkmn import — defines Node globals for the browser
-import { BattleStreams, Dex, toID } from "@pkmn/sim";
-import { ReasoningAI } from "./ai";
 import { FORMATS } from "./formats";
-import { installChampionsStats } from "./champions-stats";
 import { analyzeBluePlan } from "./game-plan-analyze";
 import type { PlanData } from "./game-plan";
+import type { WorkerGame, WorkerMsg } from "./mcts-worker";
 
-installChampionsStats(); // Reg M-B (Champions): 1 EV = +1 stat; idempotent.
-
-const TEAM_SIZE = FORMATS.vgcregmb.teamSize; // bring N (4 for Reg M-B)
-
-// Power ramp per game. Loser climbs fast, winner slowly; power only ever increases and has no
-// ceiling — past 1.0 the bot already plays the heuristic's best move every turn (mistakeRate
-// floors at 0), and the extra power keeps sharpening how hard it prioritizes KO-ing the
-// opponent's most dangerous Pokémon as its learned model grows.
-const LOSE_STEP = 0.15;
-const WIN_STEP = 0.04;
+type Book = Record<string, Record<string, number>>;
 
 export interface ComboStat {
   combo: string; // the 4 brought Pokémon, sorted + joined: "A + B + C + D" (order-independent)
@@ -43,8 +29,9 @@ export interface Tally {
   red: number; // p2 wins
   ties: number;
   games: number;
-  powerBlue: number; // 0..∞, current skill/strength
-  powerRed: number;
+  searching: boolean; // is the searcher currently thinking?
+  turn: number; // current game's turn (progress indicator)
+  sims: number; // search iterations spent on the last decision
   topBlue: ComboStat[]; // Blue's top winning 4-of-6 selections (by win rate)
   topRed: ComboStat[]; // Red's top winning 4-of-6 selections
   replayMin: number | null; // smallest game number still available to replay (null if none)
@@ -66,110 +53,6 @@ export interface GameLog {
 // a few MB while covering far more than a user would scroll back to after pressing Stop.
 const REPLAY_CAP = 500;
 
-// Protocol lines worth storing for a replay (drop per-turn housekeeping noise the viewer ignores).
-function keepReplayLine(line: string): boolean {
-  if (!line.startsWith("|")) return false;
-  if (line === "|" || line === "|upkeep") return false;
-  if (line.startsWith("|t:") || line.startsWith("|request") || line.startsWith("|split")) return false;
-  return true;
-}
-
-// speciesId -> moveId -> times that species was seen using that move (opponent tendencies).
-type Book = Record<string, Record<string, number>>;
-
-interface GameOutcome {
-  result: GameResult;
-  blueCombo: string | null; // sorted "A + B + C + D" of the four Blue brought, if captured
-  redCombo: string | null;
-  blueLead: string | null; // sorted "A + B" of the two Blue sent out first
-  redLead: string | null; // sorted "A + B" of the two Red sent out first
-  obsBlue: Book; // what Blue observed of Red this game (Red's moves)
-  obsRed: Book; // what Red observed of Blue this game (Blue's moves)
-  lines: string[]; // the game's public protocol log, for replay
-}
-
-const P1_NAME = "Blue";
-const P2_NAME = "Red";
-
-// "Pikachu, L50, M" -> "Pikachu"
-function cleanName(details: string): string {
-  return (details || "").split(",")[0].trim();
-}
-
-// Sorted, order-independent key for a lead pair (both slots must be known).
-function pairKey(a: string | null, b: string | null): string | null {
-  const both = [a, b].filter((x): x is string => !!x);
-  return both.length < 2 ? null : both.slice().sort().join(" + ");
-}
-
-// A reasoning bot whose strength is set by `power` (0 = fully random, 1 = full heuristic, and up
-// with no cap). It records the opponent's move tendencies into `obs`, biases toward KO-ing the
-// opponent's most dangerous Pokémon using the accumulated `book`, and brings a RANDOM Team
-// Preview selection (recording which four, so selections can be ranked by win rate).
-class LearningBot extends ReasoningAI {
-  selectedCombo: string | null = null;
-  private readonly power: number;
-  private readonly book: Book;
-  private readonly obs: Book;
-
-  constructor(stream: any, side: "p1" | "p2", power: number, book: Book, obs: Book) {
-    // mistakeRate floors at 0 once power reaches 1 (always takes the best move); power beyond
-    // that keeps growing foeWeight below rather than affecting move-vs-random choice.
-    super(stream, () => {}, { mistakeRate: Math.max(0, 1 - power), side });
-    this.power = power;
-    this.book = book;
-    this.obs = obs;
-  }
-
-  protected override chooseTeamPreview(team: any[]): string {
-    const n = team.length;
-    const idx = Array.from({ length: n }, (_, i) => i + 1);
-    for (let i = n - 1; i > 0; i--) {
-      const j = this.prng.random(i + 1);
-      [idx[i], idx[j]] = [idx[j], idx[i]];
-    }
-    const pick = idx.slice(0, Math.min(TEAM_SIZE, n));
-    // `team` is the request's side.pokemon; each entry carries a `details` string.
-    this.selectedCombo = pick
-      .map((i) => cleanName((team[i - 1] && (team[i - 1].details || team[i - 1].ident)) || ""))
-      .filter(Boolean)
-      .sort()
-      .join(" + ");
-    return "team " + pick.join("");
-  }
-
-  // Record every move the OPPONENT makes, keyed by their active species, into this game's obs.
-  protected override track(line: string) {
-    super.track(line);
-    if (!line.startsWith("|move|")) return;
-    const parts = line.split("|"); // ["", "move", "p2a: Foe", "Move Name", ...]
-    const pos = parts[2] ?? "";
-    if (pos.slice(0, 2) !== this.foeSide) return;
-    const slot = pos.charAt(2) === "b" ? 1 : 0;
-    const sp = this.activeSp[this.foeSide][slot];
-    const mv = toID(parts[3] ?? "");
-    if (!sp || !mv) return;
-    const bucket = (this.obs[toID(sp)] ??= {});
-    bucket[mv] = (bucket[mv] || 0) + 1;
-  }
-
-  // The strongest base power the book has ever seen this species use, scaled to 0..1.
-  private knownThreat(species: string): number {
-    const moves = this.book[toID(species)];
-    if (!moves) return 0;
-    let bestMv = "";
-    let best = 0;
-    for (const [mv, c] of Object.entries(moves)) if (c > best) ((best = c), (bestMv = mv));
-    const bp = bestMv ? Dex.moves.get(bestMv).basePower || 0 : 0;
-    return Math.min(1, bp / 120);
-  }
-
-  // Scale up the importance of hitting a foe by how dangerous we've learned it is (× power).
-  protected override foeWeight(species: string): number {
-    return 1 + this.power * this.knownThreat(species);
-  }
-}
-
 function mergeBook(dst: Book, src: Book) {
   for (const [sp, moves] of Object.entries(src)) {
     const d = (dst[sp] ??= {});
@@ -177,8 +60,7 @@ function mergeBook(dst: Book, src: Book) {
   }
 }
 
-// All selections ranked by win rate (tiebreak: more wins — i.e. larger sample — then name). The
-// UI shows the top 3; the full list is kept so a Stop → Start resume doesn't lose the rest.
+// All selections ranked by win rate (tiebreak: more wins — i.e. larger sample — then name).
 function sortByWinRate(map: Map<string, { games: number; wins: number }>): ComboStat[] {
   const rate = (c: { games: number; wins: number }) => (c.games ? c.wins / c.games : 0);
   return Array.from(map.entries())
@@ -186,8 +68,7 @@ function sortByWinRate(map: Map<string, { games: number; wins: number }>): Combo
     .sort((x, y) => rate(y) - rate(x) || y.wins - x.wins || x.combo.localeCompare(y.combo));
 }
 
-// By raw frequency — used for "the Red leads you face most", where sample size, not win rate,
-// decides which are worth calling out.
+// By raw frequency — used for "the Red leads you face most", where sample size decides relevance.
 function sortByGames(map: Map<string, { games: number; wins: number }>): ComboStat[] {
   return Array.from(map.entries())
     .map(([combo, { games, wins }]) => ({ combo, games, wins }))
@@ -205,56 +86,61 @@ export class AutoBattleController {
   private readonly p1Team: string;
   private readonly p2Team: string;
   private readonly formatid = FORMATS.vgcregmb.engineFormat;
-  private stopped = true;
   private destroyed = false;
-  private looping = false;
+  private running = false;
 
   private counts = { blue: 0, red: 0, ties: 0, games: 0 };
-  private powerBlue = 0;
-  private powerRed = 0;
-  private readonly bookBlue: Book = {}; // Blue's learned model of Red
-  private readonly bookRed: Book = {}; // Red's learned model of Blue
-  // Per side: selection combo -> { games brought, games won }.
+  private turn = 0;
+  private sims = 0;
+  private readonly bookBlue: Book = {}; // Blue's learned model of Red (for the game plan)
+  private readonly bookRed: Book = {};
   private readonly comboBlue = new Map<string, { games: number; wins: number }>();
   private readonly comboRed = new Map<string, { games: number; wins: number }>();
-  // Lead pairs, keyed by the pair — `wins` is always counted from BLUE's perspective:
-  // blueLeads = Blue's own lead → Blue wins; redLeads = the Red lead Blue faced → Blue wins.
+  // Lead pairs, always counted from BLUE's perspective (did Blue win?).
   private readonly blueLeads = new Map<string, { games: number; wins: number }>();
   private readonly redLeads = new Map<string, { games: number; wins: number }>();
   // Rolling window of the most recent games' logs (oldest first), so Stop → "view battle N" works.
   private readonly replays: GameLog[] = [];
   private lastEmit = 0;
 
-  // The stream of the game currently in flight, so stop()/destroy() can tear it down and let
-  // the in-flight `for await` resolve.
-  private activeStreams: ReturnType<typeof BattleStreams.getPlayerStreams> | null = null;
+  private worker: Worker | null = null;
 
   constructor(opts: ControllerOpts) {
     this.onUpdate = opts.onUpdate;
     this.p1Team = opts.p1Team;
     this.p2Team = opts.p2Team;
+    // The worker owns the heavy search loop; it's created lazily on first start().
   }
 
-  /** Begin (or resume) the loop. Power and learning carry over from where they left off. */
+  private ensureWorker(): Worker {
+    if (!this.worker) {
+      this.worker = new Worker(new URL("./mcts-worker.ts", import.meta.url));
+      this.worker.onmessage = (e: MessageEvent<WorkerMsg>) => this.onMessage(e.data);
+    }
+    return this.worker;
+  }
+
+  /** Begin (or resume) the loop. Tally and learning carry over from where they left off. */
   start() {
-    if (this.destroyed || this.looping) return;
-    this.stopped = false;
-    this.looping = true;
-    void this.runLoop();
-  }
-
-  /** Pause the loop; the in-flight game is abandoned. Power/learning are kept for resume. */
-  stop() {
-    this.stopped = true;
-    this.endActive();
+    if (this.destroyed || this.running) return;
+    this.running = true;
+    const w = this.ensureWorker();
+    w.postMessage({ type: "start", p1Team: this.p1Team, p2Team: this.p2Team, formatid: this.formatid });
     this.emit(true);
   }
 
-  /** Clear the tally, power, and learning back to a fresh arms race (only meaningful stopped). */
+  /** Pause after the in-flight game finishes. Tally/learning are kept for resume. */
+  stop() {
+    this.running = false;
+    this.worker?.postMessage({ type: "stop" });
+    this.emit(true);
+  }
+
+  /** Clear the tally and learning back to a fresh run (only meaningful while stopped). */
   reset() {
     this.counts = { blue: 0, red: 0, ties: 0, games: 0 };
-    this.powerBlue = 0;
-    this.powerRed = 0;
+    this.turn = 0;
+    this.sims = 0;
     for (const k of Object.keys(this.bookBlue)) delete this.bookBlue[k];
     for (const k of Object.keys(this.bookRed)) delete this.bookRed[k];
     this.comboBlue.clear();
@@ -262,14 +148,16 @@ export class AutoBattleController {
     this.blueLeads.clear();
     this.redLeads.clear();
     this.replays.length = 0;
+    this.worker?.postMessage({ type: "reset" });
     this.emit(true);
   }
 
-  /** Halt permanently and stop emitting (e.g. on React unmount). */
+  /** Halt permanently and tear the worker down (e.g. on React unmount). */
   destroy() {
     this.destroyed = true;
-    this.stopped = true;
-    this.endActive();
+    this.running = false;
+    this.worker?.terminate();
+    this.worker = null;
   }
 
   getTally(): Tally {
@@ -297,75 +185,46 @@ export class AutoBattleController {
     });
   }
 
-  private endActive() {
-    const s = this.activeStreams;
-    this.activeStreams = null;
-    if (!s) return;
-    try {
-      void s.omniscient.writeEnd();
-    } catch {
-      /* already torn down */
-    }
-  }
-
-  private bump(power: number, step: number): number {
-    return power + step; // no ceiling — power only ever grows
-  }
-
-  private async runLoop() {
-    try {
-      while (!this.stopped && !this.destroyed) {
-        const o = await this.runGame();
-        if (this.stopped || this.destroyed) break;
-
-        // Result + tally.
-        if (o.result === "blue") this.counts.blue++;
-        else if (o.result === "red") this.counts.red++;
-        else this.counts.ties++;
-        this.counts.games++;
-
-        // Each side's selection played one game; the winning side's selection also won it.
-        this.recordCombo(this.comboBlue, o.blueCombo, o.result === "blue");
-        this.recordCombo(this.comboRed, o.redCombo, o.result === "red");
-        // Lead pairs — both tracked from Blue's perspective (did Blue win?).
-        this.recordCombo(this.blueLeads, o.blueLead, o.result === "blue");
-        this.recordCombo(this.redLeads, o.redLead, o.result === "blue");
-
-        // Keep this game's log in the rolling replay window (evict the oldest past the cap).
-        this.replays.push({
-          n: this.counts.games,
-          result: o.result,
-          blueLead: o.blueLead,
-          redLead: o.redLead,
-          lines: o.lines,
-        });
-        if (this.replays.length > REPLAY_CAP) this.replays.shift();
-
-        // Learn: fold this game's observations into each side's persistent model.
-        mergeBook(this.bookBlue, o.obsBlue);
-        mergeBook(this.bookRed, o.obsRed);
-
-        // Ramp power — loser fast, winner slow, ties nudge both; never decreases, no cap.
-        if (o.result === "blue") {
-          this.powerBlue = this.bump(this.powerBlue, WIN_STEP);
-          this.powerRed = this.bump(this.powerRed, LOSE_STEP);
-        } else if (o.result === "red") {
-          this.powerRed = this.bump(this.powerRed, WIN_STEP);
-          this.powerBlue = this.bump(this.powerBlue, LOSE_STEP);
-        } else {
-          this.powerBlue = this.bump(this.powerBlue, WIN_STEP);
-          this.powerRed = this.bump(this.powerRed, WIN_STEP);
-        }
-
-        this.emit(false);
-        // Yield so the UI stays responsive even when many games run per second.
-        await new Promise((r) => setTimeout(r, 0));
-      }
-    } finally {
-      this.looping = false;
-      this.endActive();
+  private onMessage(msg: WorkerMsg) {
+    if (this.destroyed) return;
+    if (msg.type === "progress") {
+      this.turn = msg.turn;
+      this.sims = msg.sims;
+      this.emit(false);
+    } else if (msg.type === "game") {
+      this.recordGame(msg);
+      this.emit(false);
+    } else if (msg.type === "stopped") {
       this.emit(true);
     }
+  }
+
+  private recordGame(o: WorkerGame) {
+    if (o.result === "blue") this.counts.blue++;
+    else if (o.result === "red") this.counts.red++;
+    else this.counts.ties++;
+    this.counts.games++;
+
+    // Each side's selection played one game; the winning side's selection also won it.
+    this.recordCombo(this.comboBlue, o.blueCombo, o.result === "blue");
+    this.recordCombo(this.comboRed, o.redCombo, o.result === "red");
+    // Lead pairs — both tracked from Blue's perspective.
+    this.recordCombo(this.blueLeads, o.blueLead, o.result === "blue");
+    this.recordCombo(this.redLeads, o.redLead, o.result === "blue");
+
+    // Rolling replay window (evict the oldest past the cap).
+    this.replays.push({
+      n: this.counts.games,
+      result: o.result,
+      blueLead: o.blueLead,
+      redLead: o.redLead,
+      lines: o.lines,
+    });
+    if (this.replays.length > REPLAY_CAP) this.replays.shift();
+
+    // Fold this game's observations into each side's learned model (feeds the game plan).
+    mergeBook(this.bookBlue, o.obsBlue);
+    mergeBook(this.bookRed, o.obsRed);
   }
 
   private recordCombo(
@@ -380,91 +239,12 @@ export class AutoBattleController {
     map.set(combo, cur);
   }
 
-  /** Play one full game to completion (or until stopped). Resolves with winner, selections, learning. */
-  private async runGame(): Promise<GameOutcome> {
-    const streams = BattleStreams.getPlayerStreams(new BattleStreams.BattleStream());
-    this.activeStreams = streams;
-
-    // What each side observes of the other this game (merged into the books afterwards).
-    const obsBlue: Book = {};
-    const obsRed: Book = {};
-
-    // The public protocol log, captured line-by-line for replay.
-    const lines: string[] = [];
-
-    // Bots built at the current power level; a fresh PRNG each game keeps play varied.
-    const ai1 = new LearningBot(streams.p1, "p1", this.powerBlue, this.bookBlue, obsBlue);
-    const ai2 = new LearningBot(streams.p2, "p2", this.powerRed, this.bookRed, obsRed);
-    void ai1.start();
-    void ai2.start();
-
-    void streams.omniscient.write(
-      `>start ${JSON.stringify({ formatid: this.formatid })}\n` +
-        `>player p1 ${JSON.stringify({ name: P1_NAME, team: this.p1Team })}\n` +
-        `>player p2 ${JSON.stringify({ name: P2_NAME, team: this.p2Team })}`
-    );
-
-    // First species to appear in each active slot = that side's lead (never overwritten).
-    const p1Lead: (string | null)[] = [null, null];
-    const p2Lead: (string | null)[] = [null, null];
-
-    let result: GameResult = "tie";
-    try {
-      for await (const chunk of streams.omniscient) {
-        if (this.stopped || this.destroyed) break;
-        let done = false;
-        for (const line of chunk.split("\n")) {
-          if (keepReplayLine(line)) lines.push(line);
-          if (line.startsWith("|switch|") || line.startsWith("|drag|")) {
-            const parts = line.split("|"); // ["", "switch", "p1a: X", "Species, L50, M", ...]
-            const pos = parts[2] ?? "";
-            const sp = cleanName(parts[3] ?? "");
-            const slot = pos.charAt(2) === "b" ? 1 : 0;
-            if (pos.startsWith("p1") && p1Lead[slot] === null) p1Lead[slot] = sp;
-            else if (pos.startsWith("p2") && p2Lead[slot] === null) p2Lead[slot] = sp;
-            continue;
-          }
-          if (line.startsWith("|win|")) {
-            const winner = line.slice("|win|".length).trim();
-            result = winner === P1_NAME ? "blue" : winner === P2_NAME ? "red" : "tie";
-            done = true;
-            break;
-          }
-          if (line === "|tie" || line.startsWith("|tie|")) {
-            result = "tie";
-            done = true;
-            break;
-          }
-        }
-        if (done) break;
-      }
-    } catch {
-      // stream torn down on stop/destroy — treat as no result (loop will exit on the flag)
-    } finally {
-      if (this.activeStreams === streams) this.activeStreams = null;
-      try {
-        void streams.omniscient.writeEnd();
-      } catch {
-        /* noop */
-      }
-    }
-    return {
-      result,
-      blueCombo: ai1.selectedCombo,
-      redCombo: ai2.selectedCombo,
-      blueLead: pairKey(p1Lead[0], p1Lead[1]),
-      redLead: pairKey(p2Lead[0], p2Lead[1]),
-      obsBlue,
-      obsRed,
-      lines,
-    };
-  }
-
   private snapshot(): Tally {
     return {
       ...this.counts,
-      powerBlue: this.powerBlue,
-      powerRed: this.powerRed,
+      searching: this.running,
+      turn: this.turn,
+      sims: this.sims,
       topBlue: sortByWinRate(this.comboBlue),
       topRed: sortByWinRate(this.comboRed),
       replayMin: this.replays[0]?.n ?? null,
@@ -472,10 +252,9 @@ export class AutoBattleController {
     };
   }
 
-  // Throttle UI updates to ~4x/sec so a turbo loop doesn't flood React with renders. `force`
-  // (stop/reset/final) always emits.
+  // Throttle UI updates to ~4x/sec; `force` (start/stop/reset/final) always emits.
   private emit(force: boolean) {
-    if (this.destroyed) return; // never emit after unmount
+    if (this.destroyed) return;
     const now = Date.now();
     if (!force && now - this.lastEmit < 250) return;
     this.lastEmit = now;
