@@ -61,94 +61,10 @@ export interface PlanData {
   vsRedLeads: RedLeadPlan[]; // what to do against Red's most common leads
   threats: PlanThreat[];
   threatPlans: ThreatPlan[]; // legacy: one branch per major threat (fallback for older links)
-  leadScenarios: LeadScenario[]; // one KO-sequence branch per opposing lead (drives the flowchart)
+  leadScenarios: LeadScenario[]; // one KO-sequence plan per opposing lead (the per-scenario game plan)
 }
 
 // ---- Rendering (pure) ------------------------------------------------------------------------
-
-const esc = (s: string) => s.replace(/"/g, "'"); // keep labels safe inside quoted mermaid nodes
-const L = (s: string) => `"${esc(s)}"`;
-
-// A branching game-plan flowchart: the lead/back sit at the top, and one branch fans out per
-// opposing lead that threatens our lead. Each branch is its OWN flowchart — an ordered chain of
-// steps spelling out what to do and when to KO each opposing Pokémon (highest threat first),
-// accounting for the back line — plus an "else" branch for an unfamiliar lead or a Red misplay.
-// This mirrors the hand-drawn scenario tree: as many branches as there are threatening leads,
-// each giving a full game-plan flow chart, plus one.
-export function planToMermaid(p: PlanData): string {
-  // Guard against a plan shape missing fields (e.g. from an older encoded link).
-  const selection = p.selection ?? [];
-  const lead = p.lead ?? { mons: [] as string[], reason: "" };
-  const back = p.back ?? [];
-  const scenarios = p.leadScenarios ?? [];
-  const threatPlans = p.threatPlans ?? [];
-  const threats = p.threats ?? [];
-  const winCondition = p.winCondition ?? "Trade efficiently and keep more Pokémon on the board.";
-
-  const leadTxt = lead.mons.length ? lead.mons.join(" + ") : "your two strongest";
-  const backTxt = back.length
-    ? back.join(" + ")
-    : selection.filter((s) => !lead.mons.includes(s)).join(" + ") || "your other two";
-  const speedTool = p.archetype === "Tempo" ? "your speed control / tempo tools" : p.archetype;
-
-  const n: string[] = ["flowchart TD"];
-
-  // Root: the lead and the back you're holding in reserve (the "Insert Mons" boxes in the sketch).
-  n.push(
-    `  Lead[${L(`Lead: ${leadTxt}<br/>Back: ${backTxt}<br/>Win condition: ${winCondition}`)}]`
-  );
-
-  // Emit a decision node under Lead, then a vertical chain of step nodes below it.
-  const emitBranch = (id: string, condLabel: string, steps: string[]) => {
-    n.push(`  Lead --> ${id}`);
-    n.push(`  ${id}{${L(condLabel)}}`);
-    let prev = id;
-    steps.forEach((step, j) => {
-      const sid = `${id}s${j}`;
-      n.push(`  ${prev} --> ${sid}`);
-      n.push(`  ${sid}[${L(step)}]`);
-      prev = sid;
-    });
-  };
-
-  if (scenarios.length) {
-    // Primary: one KO-sequence flowchart per opposing lead that threatens our lead.
-    scenarios.forEach((s, i) => {
-      const cond = `IF Red leads<br/>${s.redLead.join(" + ")}<br/>(Blue ${s.winPct}% over ${s.games.toLocaleString()})`;
-      emitBranch(`L${i}`, cond, s.steps);
-    });
-  } else {
-    // Legacy fallback for older encoded links: single-node branch per individual threat.
-    const branches: ThreatPlan[] = threatPlans.length
-      ? threatPlans
-      : threats.map((t) => ({
-          species: t.species,
-          move: t.move,
-          answer: "",
-          answerFromBack: false,
-          plan: `Gang up and KO ${t.species}${t.move ? ` (watch ${t.move})` : ""} before it moves, then bring your back to clean up.`,
-        }));
-    branches.forEach((t, i) => {
-      const cond = `IF ${t.species}${t.move ? ` (${t.move})` : ""}<br/>is the biggest threat`;
-      emitBranch(`L${i}`, cond, [t.plan]);
-    });
-  }
-
-  // The extra "else" branch — unfamiliar lead, or Red misplays: a general KO sequence.
-  const threatList = threats.length
-    ? threats.map((t) => `${t.species}${t.move ? ` (${t.move})` : ""}`).join(" · ")
-    : "Red's most dangerous mon";
-  emitBranch("Lelse", "Else — unfamiliar lead,<br/>or Red misplays", [
-    `Turn 1: ${lead.reason || "lead your setup and trade efficiently"}`,
-    `KO the biggest threat first — ${threatList}`,
-    `Take every guaranteed KO and keep ${speedTool} up`,
-    back.length
-      ? `Bring ${back.join(" + ")} in to close it out — ${winCondition}`
-      : `Close it out — ${winCondition}`,
-  ]);
-
-  return n.join("\n");
-}
 
 export function planToBullets(p: PlanData): string[] {
   const selection = p.selection ?? [];

@@ -1517,24 +1517,6 @@ body {
   color: #dfe4ff;
 }
 
-.plan-chart {
-  background: rgba(5, 6, 15, 0.6);
-  border: 1px solid rgba(123, 91, 255, 0.3);
-  border-radius: 12px;
-  padding: 1rem;
-  overflow-x: auto;
-}
-
-.plan-mermaid {
-  display: flex;
-  justify-content: center;
-}
-
-.plan-mermaid svg {
-  max-width: 100%;
-  height: auto;
-}
-
 .plan-actions {
   margin-top: 1.5rem;
 }
