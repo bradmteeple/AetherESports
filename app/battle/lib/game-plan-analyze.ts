@@ -5,7 +5,7 @@
 
 import "./node-shim"; // must precede any @pkmn import
 import { Dex, Teams, toID } from "@pkmn/sim";
-import type { PlanData, PlanThreat, RedLeadPlan, ThreatPlan } from "./game-plan";
+import type { LeadScenario, PlanData, PlanThreat, RedLeadPlan, ThreatPlan } from "./game-plan";
 
 type Book = Record<string, Record<string, number>>;
 type Stat = { combo: string; games: number; wins: number };
@@ -168,6 +168,96 @@ function threatToPlan(
   };
 }
 
+// How badly a Red Pokémon threatens Blue's lead: its offense, scaled by the best type multiplier
+// it has into either lead mon and biased up for speed (faster mons hit our lead before we move).
+// Used to decide which opposing lead Pokémon Blue should knock out first.
+function threatToLead(redName: string, blueLead: MonInfo[]): number {
+  const sp = Dex.species.get(redName);
+  const off = Math.max(sp.baseStats?.atk ?? 0, sp.baseStats?.spa ?? 0);
+  const redTypes = sp.types ?? [];
+  let best = 0.25; // never zero, so KO ordering stays stable even against a resisted attacker
+  for (const bl of blueLead) {
+    const mult = redTypes.reduce((mx, t) => Math.max(mx, typeEff(t, bl.types)), 0);
+    best = Math.max(best, mult);
+  }
+  const speedBias = 1 + (sp.baseStats?.spe ?? 0) / 400;
+  return off * best * speedBias;
+}
+
+function winShort(archetype: PlanData["archetype"]): string {
+  return archetype === "Trick Room"
+    ? "sweep while Trick Room is up"
+    : archetype === "Tailwind"
+    ? "press your Tailwind speed lead"
+    : "keep more Pokémon on the board";
+}
+
+// Build one branch flowchart for a specific opposing lead: an ordered set of steps that says what
+// to do turn 1 (setup / disruption), then which opposing Pokémon to KO and in what order (worst
+// threat to our lead first), then how to close with the back line.
+function leadToScenario(
+  redLead: string[],
+  pool: MonInfo[],
+  blueLead: MonInfo[],
+  leadIds: Set<string>,
+  back: string[],
+  archetype: PlanData["archetype"],
+  winPct: number,
+  games: number
+): LeadScenario {
+  // Rank the opposing lead by how hard each mon threatens our lead — remove the worst first.
+  const ranked = redLead
+    .map((name) => ({ name, score: threatToLead(name, blueLead), answer: bestAnswer(name, pool) }))
+    .sort((x, y) => y.score - x.score);
+
+  const steps: string[] = [];
+
+  // Step 1 — setup / disruption, tuned to our archetype and disruption tools.
+  const fast = ranked[0]?.name ?? "their lead";
+  const fake = pool.find((m) => m.hasFakeOut);
+  if (archetype === "Trick Room") {
+    steps.push(
+      fake
+        ? `Turn 1: set Trick Room; ${fake.species} Fake Out ${fast} so it can't move.`
+        : `Turn 1: set Trick Room, protecting the setter if ${fast} pressures it.`
+    );
+  } else if (archetype === "Tailwind") {
+    steps.push(
+      fake
+        ? `Turn 1: set Tailwind to out-speed; ${fake.species} Fake Out ${fast} for tempo.`
+        : `Turn 1: set Tailwind to out-speed their lead.`
+    );
+  } else {
+    steps.push(
+      fake
+        ? `Turn 1: ${fake.species} Fake Out ${fast}, then hit into their lead.`
+        : `Turn 1: pressure ${fast} and take any free KO.`
+    );
+  }
+
+  // Steps 2..n — KO the opposing lead in priority order (highest threat to our lead first).
+  ranked.forEach((r, i) => {
+    const ans = r.answer?.species ?? "your best super-effective hit";
+    const fromBack = r.answer ? !leadIds.has(toID(r.answer.species)) : false;
+    const bring = fromBack ? ` — bring ${r.answer!.species} in from the back` : "";
+    const verb = i === 0 ? "KO" : "Then KO";
+    const why = i === 0 ? " first (it most threatens your lead)" : "";
+    steps.push(`${verb} ${r.name}${why}: focus it with ${ans}${bring}.`);
+  });
+
+  // Final — bring any untapped reserves and close on the win condition.
+  const usedIds = new Set(ranked.filter((r) => r.answer).map((r) => toID(r.answer!.species)));
+  const reserve = back.filter((n) => !usedIds.has(toID(n)));
+  const closeBack = reserve.length ? reserve : back;
+  steps.push(
+    closeBack.length
+      ? `Bring ${closeBack.join(" + ")} in to clean up the rest — ${winShort(archetype)}.`
+      : `Clean up the rest — ${winShort(archetype)}.`
+  );
+
+  return { redLead, winPct, games, steps };
+}
+
 export function analyzeBluePlan(a: AnalyzeArgs): PlanData {
   const decided = a.blueWins + a.redWins;
   const winPct = decided ? Math.round((a.blueWins / decided) * 100) : 0;
@@ -255,6 +345,28 @@ export function analyzeBluePlan(a: AnalyzeArgs): PlanData {
       };
     });
 
+  // The lead Pokémon (as team shapes) that our lead has to survive — used to rank KO priority.
+  const blueLead = lead.mons
+    .map((n) => team.find((m) => toID(m.species) === toID(n)))
+    .filter(Boolean) as MonInfo[];
+
+  // One KO-sequence branch per common opposing lead that threatens our lead (top 3 with a sample).
+  const leadScenarios: LeadScenario[] = a.redLeads
+    .filter((s) => s.games >= MIN_LEAD_GAMES)
+    .slice(0, 3)
+    .map((s) =>
+      leadToScenario(
+        s.combo.split(" + "),
+        pool,
+        blueLead,
+        leadIds,
+        back,
+        archetype,
+        s.games ? Math.round((s.wins / s.games) * 100) : 0,
+        s.games
+      )
+    );
+
   return {
     blueTeam: a.blueTeamName,
     redTeam: a.redTeamName,
@@ -273,5 +385,6 @@ export function analyzeBluePlan(a: AnalyzeArgs): PlanData {
     vsRedLeads,
     threats,
     threatPlans,
+    leadScenarios,
   };
 }
