@@ -1,7 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AutoBattleController, ComboWin, GameResult, Tally } from "../battle/lib/auto-engine";
+import type {
+  AutoBattleController,
+  ComboWin,
+  GameResult,
+  OpponentProgress,
+  Tally,
+} from "../battle/lib/auto-engine";
 import { buildReplayFrames, type ReplayFrame, type RosterEntry } from "../battle/lib/auto-replay";
 import type { ActiveMon, BoardState } from "../battle/lib/protocol";
 import { pokeSprite, pokeThumb } from "../battle/lib/sprites";
@@ -12,7 +18,16 @@ import type { LoadedTeam } from "../battle/lib/pokepaste";
 interface Replay {
   n: number;
   result: GameResult;
+  redName: string; // the opponent this game was against
   frames: ReplayFrame[];
+}
+
+// One opponent in the gauntlet roster the user is building (a preset or a custom upload).
+interface Opponent {
+  id: string; // stable key: a preset id or a generated custom id
+  name: string;
+  packed: string;
+  custom: boolean;
 }
 
 const ZERO: Tally = {
@@ -20,17 +35,20 @@ const ZERO: Tally = {
   red: 0,
   ties: 0,
   games: 0,
+  roster: [],
+  currentIndex: 0,
+  complete: false,
   searching: false,
   turn: 0,
   sims: 0,
   topCombos: [],
+  focusId: null,
   replayMin: null,
   replayMax: null,
   error: null,
 };
 
 const DEFAULT_BLUE = REG_MB_TEAMS[0]?.id ?? "";
-const DEFAULT_RED = (REG_MB_TEAMS[1] ?? REG_MB_TEAMS[0])?.id ?? "";
 
 // A short label for an uploaded team, or null when a side uses its preset dropdown.
 function uploadLabel(team: LoadedTeam | null): string | null {
@@ -39,25 +57,38 @@ function uploadLabel(team: LoadedTeam | null): string | null {
   return `Custom · ${shown}${team.species.length > 2 ? "…" : ""}`;
 }
 
+// The gauntlet starts with every preset except Blue's default team, in registry order.
+const DEFAULT_OPPONENTS: Opponent[] = REG_MB_TEAMS.filter((t) => t.id !== DEFAULT_BLUE).map((t) => ({
+  id: t.id,
+  name: t.name,
+  packed: t.packed,
+  custom: false,
+}));
+
 export default function AutoMode() {
   const [running, setRunning] = useState(false);
   const [loading, setLoading] = useState(false); // engine chunk loading on the first Start
   const [tally, setTally] = useState<Tally>(ZERO);
   const [blueId, setBlueId] = useState(DEFAULT_BLUE);
-  const [redId, setRedId] = useState(DEFAULT_RED);
   const [blueUpload, setBlueUpload] = useState<LoadedTeam | null>(null); // uploaded team overrides preset
-  const [redUpload, setRedUpload] = useState<LoadedTeam | null>(null);
+  const [opponents, setOpponents] = useState<Opponent[]>(DEFAULT_OPPONENTS); // the ordered roster
+  const [focusId, setFocusId] = useState<string | null>(null); // opponent the combos panel reflects
   const [replayNum, setReplayNum] = useState<string>(""); // the battle number typed in
   const [replay, setReplay] = useState<Replay | null>(null); // the battle currently shown
   const [replayError, setReplayError] = useState<string | null>(null);
   const controllerRef = useRef<AutoBattleController | null>(null);
   const runningRef = useRef(false); // mirrors `running` for async guards
   const aliveRef = useRef(true);
+  const customCounter = useRef(0); // gives each custom-uploaded opponent a stable, unique id
 
   const setRun = useCallback((v: boolean) => {
     runningRef.current = v;
     setRunning(v);
   }, []);
+
+  // A stable string key over the roster (ids, in order) so the teardown effect only fires on a real
+  // roster change — not on every render's new array identity.
+  const rosterKey = opponents.map((o) => o.id).join(",");
 
   // Track mount so an in-flight engine import can bail if we've unmounted.
   useEffect(() => {
@@ -67,31 +98,43 @@ export default function AutoMode() {
     };
   }, []);
 
-  // If the worker reports it can't run the matchup, stop the UI's running state too.
+  // If the worker reports it can't run a matchup, stop the UI's running state too.
   useEffect(() => {
     if (tally.error) setRun(false);
   }, [tally.error, setRun]);
 
-  // The controller stays alive across Stop/Start so power/learning persist (they must only ever
-  // ramp up). Changing a team (or unmounting) tears it down; a fresh one is built on next Start.
+  // The controller stays alive across Stop/Start so a gauntlet resumes where it left off. Changing
+  // Blue's team or editing the roster (or unmounting) tears it down; a fresh one is built on Start.
   useEffect(() => {
     setRun(false);
     setTally(ZERO);
     setReplay(null);
     setReplayError(null);
     setReplayNum("");
+    setFocusId(null);
     setLoading(false);
     return () => {
       controllerRef.current?.destroy();
       controllerRef.current = null;
     };
-  }, [blueId, redId, blueUpload, redUpload, setRun]);
+  }, [blueId, blueUpload, rosterKey, setRun]);
+
+  const addCustomOpponent = useCallback((team: LoadedTeam) => {
+    customCounter.current += 1;
+    const id = `custom-${customCounter.current}`;
+    setOpponents((prev) => [
+      ...prev,
+      { id, name: uploadLabel(team) ?? "Custom team", packed: team.packed, custom: true },
+    ]);
+  }, []);
 
   // Start creates the engine lazily on click (the @pkmn chunk is large — never gate the button
   // behind it). The button flips to running immediately; the loop begins once the chunk loads.
   const start = useCallback(async () => {
     setReplay(null);
     setReplayError(null);
+    // A finished gauntlet re-runs from the top when Start is pressed again.
+    if (controllerRef.current && tally.complete) controllerRef.current.reset();
     setRun(true);
     try {
       if (!controllerRef.current) {
@@ -99,16 +142,16 @@ export default function AutoMode() {
         const { AutoBattleController } = await import("../battle/lib/auto-engine");
         if (!aliveRef.current) return;
         if (!controllerRef.current) {
-          // An uploaded team overrides that side's preset dropdown.
+          // An uploaded team overrides Blue's preset dropdown.
           const p1Team = blueUpload?.packed ?? teamById(blueId)?.packed;
-          const p2Team = redUpload?.packed ?? teamById(redId)?.packed;
-          if (!p1Team || !p2Team) {
+          const roster = opponents.map(({ id, name, packed }) => ({ id, name, packed }));
+          if (!p1Team || roster.length === 0) {
             setRun(false);
             return;
           }
           controllerRef.current = new AutoBattleController({
             p1Team,
-            p2Team,
+            roster,
             onUpdate: (t) => setTally(t),
           });
         }
@@ -119,7 +162,7 @@ export default function AutoMode() {
     } finally {
       setLoading(false);
     }
-  }, [blueId, redId, blueUpload, redUpload, setRun]);
+  }, [blueId, blueUpload, opponents, tally.complete, setRun]);
 
   const stop = useCallback(() => {
     const c = controllerRef.current;
@@ -136,7 +179,14 @@ export default function AutoMode() {
     setReplay(null);
     setReplayError(null);
     setReplayNum("");
+    setFocusId(null);
     controllerRef.current?.reset();
+  }, []);
+
+  // Point the combos panel at a specific opponent.
+  const focusOpponent = useCallback((id: string) => {
+    setFocusId(id);
+    controllerRef.current?.setFocus(id);
   }, []);
 
   // Load battle `n` and render its play-by-play in the viewer. Shared by the manual box and the
@@ -161,13 +211,19 @@ export default function AutoMode() {
     }
     setReplayError(null);
     setReplayNum(String(n));
-    setReplay({ n: g.n, result: g.result, frames: buildReplayFrames(g.lines) });
+    setReplay({
+      n: g.n,
+      result: g.result,
+      redName: c.opponentName(g.opponentId) ?? "Red",
+      frames: buildReplayFrames(g.lines),
+    });
   }, []);
 
   const viewBattle = useCallback(() => openReplay(parseInt(replayNum, 10)), [replayNum, openReplay]);
 
   const blueName = uploadLabel(blueUpload) ?? teamById(blueId)?.name ?? "—";
-  const redName = uploadLabel(redUpload) ?? teamById(redId)?.name ?? "—";
+  const currentName = tally.roster[tally.currentIndex]?.name ?? "—";
+  const focusName = tally.roster.find((o) => o.id === tally.focusId)?.name ?? "";
   const decided = tally.blue + tally.red;
   const bluePct = decided ? Math.round((tally.blue / decided) * 100) : 0;
   const redPct = decided ? 100 - bluePct : 0;
@@ -176,12 +232,13 @@ export default function AutoMode() {
     <div className="auto-page">
       <h1 className="page-title">Auto Battle</h1>
       <p className="page-text">
-        Two AIs play VGC 2026 Reg M-B. Every decision is a Monte Carlo search that looks ahead over
-        a forked copy of the real battle simulator: it treats each simultaneous turn as a small game
-        and plays a mixed strategy, averages over the luck, and works out when to Mega Evolve on its
-        own — nothing about it is scripted. It runs deliberately slowly for accuracy, so games
-        accumulate over time. Below the score are the two lead+back combinations Blue won the most
-        with — click any win to watch that battle.
+        Blue faces an ordered roster of opponents. Every decision is a Monte Carlo search that looks
+        ahead over a forked copy of the real battle simulator — mixed strategies, averaged luck, and
+        Mega timing worked out on its own; nothing is scripted. Blue keeps playing each opponent until
+        it <em>dominantly</em> wins — 95%-confident (Wilson score) that its true win rate over decided
+        games is above 60%, over at least 15 decided games — then advances to the next team. It runs
+        deliberately slowly for accuracy, and a stuck matchup (like a mirror) plays on until you press
+        Stop. Click any winning combination below to watch that battle.
       </p>
 
       <div className="auto-teampick">
@@ -192,22 +249,6 @@ export default function AutoMode() {
             value={blueId}
             disabled={running || !!blueUpload}
             onChange={(e) => setBlueId(e.target.value)}
-          >
-            {REG_MB_TEAMS.map((t) => (
-              <option key={t.id} value={t.id}>
-                {t.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <span className="auto-vs">vs</span>
-        <label className="auto-team-field auto-team-field--red">
-          <span className="auto-team-label">Red team</span>
-          <select
-            className="auto-team-select"
-            value={redId}
-            disabled={running || !!redUpload}
-            onChange={(e) => setRedId(e.target.value)}
           >
             {REG_MB_TEAMS.map((t) => (
               <option key={t.id} value={t.id}>
@@ -227,21 +268,20 @@ export default function AutoMode() {
           onLoad={setBlueUpload}
           onClear={() => setBlueUpload(null)}
         />
-        <TeamUpload
-          accent="red"
-          label="Red"
-          team={redUpload}
-          disabled={running}
-          onLoad={setRedUpload}
-          onClear={() => setRedUpload(null)}
-        />
       </div>
+
+      <RosterBuilder
+        opponents={opponents}
+        setOpponents={setOpponents}
+        disabled={running}
+        onAddCustom={addCustomOpponent}
+      />
 
       <div className="auto-controls">
         <button
           className="battle-btn auto-btn--start"
           onClick={start}
-          disabled={running || !blueId || !redId}
+          disabled={running || !blueId || opponents.length === 0}
         >
           ▶ Start
         </button>
@@ -262,9 +302,11 @@ export default function AutoMode() {
               : tally.turn
                 ? `searching · turn ${tally.turn}`
                 : "thinking…"
-            : tally.games
-              ? "stopped"
-              : "idle"}
+            : tally.complete
+              ? "complete"
+              : tally.games
+                ? "stopped"
+                : "idle"}
         </span>
 
         {!running && tally.replayMax != null && (
@@ -307,18 +349,25 @@ export default function AutoMode() {
         </p>
       )}
       {replayError && <p className="auto-replay-error">{replayError}</p>}
-      {replay && <ReplayViewer replay={replay} blueName={blueName} redName={redName} />}
+      {replay && <ReplayViewer replay={replay} blueName={blueName} redName={replay.redName} />}
 
       {running && (
         <div className="auto-thinking">
           <span className="auto-thinking-dot" />
           <span className="auto-thinking-text">
-            {blueName} vs {redName} — searching {tally.sims.toLocaleString()} sims per decision
-            {tally.turn ? ` · game turn ${tally.turn}` : ""}. Games finish slowly; the tally grows as
-            they complete.
+            {blueName} vs {currentName} — searching {tally.sims.toLocaleString()} sims per decision
+            {tally.turn ? ` · game turn ${tally.turn}` : ""}. Games finish slowly; Blue advances only
+            once it dominantly wins.
           </span>
         </div>
       )}
+
+      <RosterProgress
+        roster={tally.roster}
+        complete={tally.complete}
+        focusId={tally.focusId}
+        onFocus={focusOpponent}
+      />
 
       <div className="auto-scoreboard">
         <div className="auto-stat auto-stat--blue">
@@ -343,13 +392,178 @@ export default function AutoMode() {
         </div>
       </div>
 
-      <TopCombos combos={tally.topCombos} blueName={blueName} onOpen={openReplay} />
+      <TopCombos combos={tally.topCombos} blueName={blueName} focusName={focusName} onOpen={openReplay} />
 
       <p className="auto-note">
         A &quot;combination&quot; is a specific bring-4 split into a lead pair and a back pair; the two
-        shown are the ones Blue won the most games with. Changing a team or pressing Reset clears the
+        shown are the ones Blue won the most games with against the selected opponent — click an
+        opponent above to inspect its combinations. Editing the roster or pressing Reset clears the
         tally. Only the most recent 500 battles are stored, so some older wins may not be watchable.
       </p>
+    </div>
+  );
+}
+
+// The opponent roster the gauntlet runs through, in order. Presets are toggled on/off; custom teams
+// are uploaded (and validated as Reg M-B legal by TeamUpload) and added as extra opponents. Order is
+// the gauntlet sequence, adjustable with the up/down controls.
+function RosterBuilder({
+  opponents,
+  setOpponents,
+  disabled,
+  onAddCustom,
+}: {
+  opponents: Opponent[];
+  setOpponents: React.Dispatch<React.SetStateAction<Opponent[]>>;
+  disabled: boolean;
+  onAddCustom: (team: LoadedTeam) => void;
+}) {
+  const inRoster = (id: string) => opponents.some((o) => o.id === id);
+  const togglePreset = (t: { id: string; name: string; packed: string }) => {
+    setOpponents((prev) =>
+      prev.some((o) => o.id === t.id)
+        ? prev.filter((o) => o.id !== t.id)
+        : [...prev, { id: t.id, name: t.name, packed: t.packed, custom: false }]
+    );
+  };
+  const move = (i: number, dir: -1 | 1) => {
+    setOpponents((prev) => {
+      const j = i + dir;
+      if (j < 0 || j >= prev.length) return prev;
+      const next = prev.slice();
+      [next[i], next[j]] = [next[j], next[i]];
+      return next;
+    });
+  };
+  const remove = (id: string) => setOpponents((prev) => prev.filter((o) => o.id !== id));
+
+  return (
+    <div className="auto-roster-build">
+      <div className="auto-roster-title">Opponent roster · Blue must dominantly beat each in order</div>
+
+      {opponents.length === 0 ? (
+        <p className="auto-note auto-plan-hint--center">
+          Add at least one opponent — check a preset below or upload a custom team.
+        </p>
+      ) : (
+        <ol className="auto-roster-list">
+          {opponents.map((o, i) => (
+            <li key={o.id} className="auto-roster-row">
+              <span className="auto-roster-order">{i + 1}</span>
+              <span className="auto-roster-name">
+                {o.name}
+                {o.custom && <span className="auto-roster-tag">custom</span>}
+              </span>
+              <span className="auto-roster-actions">
+                <button
+                  className="battle-btn battle-btn--ghost auto-roster-mini"
+                  disabled={disabled || i === 0}
+                  onClick={() => move(i, -1)}
+                  aria-label="Move up"
+                >
+                  ↑
+                </button>
+                <button
+                  className="battle-btn battle-btn--ghost auto-roster-mini"
+                  disabled={disabled || i === opponents.length - 1}
+                  onClick={() => move(i, 1)}
+                  aria-label="Move down"
+                >
+                  ↓
+                </button>
+                <button
+                  className="battle-btn battle-btn--ghost auto-roster-mini"
+                  disabled={disabled}
+                  onClick={() => remove(o.id)}
+                  aria-label="Remove"
+                >
+                  ✕
+                </button>
+              </span>
+            </li>
+          ))}
+        </ol>
+      )}
+
+      <div className="auto-roster-presets">
+        {REG_MB_TEAMS.map((t) => (
+          <label key={t.id} className="auto-roster-check">
+            <input
+              type="checkbox"
+              checked={inRoster(t.id)}
+              disabled={disabled}
+              onChange={() => togglePreset(t)}
+            />
+            <span>{t.name}</span>
+          </label>
+        ))}
+      </div>
+
+      <div className="auto-uploads">
+        <TeamUpload
+          accent="red"
+          label="opponent"
+          team={null}
+          disabled={disabled}
+          onLoad={onAddCustom}
+          onClear={() => {}}
+          titleText="Add a custom opponent"
+          ctaText="Add opponent"
+          noteText="Must be Reg M-B legal (66-EV budget, no Restricted Legendaries). Adds one opponent to the roster."
+        />
+      </div>
+    </div>
+  );
+}
+
+// The gauntlet standings: each opponent's record, its Wilson win-rate floor against the 60% bar, and
+// its status. Click a row to point the winning-combinations panel at that opponent.
+function RosterProgress({
+  roster,
+  complete,
+  focusId,
+  onFocus,
+}: {
+  roster: OpponentProgress[];
+  complete: boolean;
+  focusId: string | null;
+  onFocus: (id: string) => void;
+}) {
+  if (!roster.length) return null;
+  const beaten = roster.filter((o) => o.beaten).length;
+  return (
+    <div className="auto-progress">
+      <div className="auto-progress-title">
+        Gauntlet · beaten {beaten} of {roster.length}
+      </div>
+      {complete && (
+        <div className="auto-complete">
+          🏆 Gauntlet complete — Blue dominantly beat all {roster.length} opponents.
+        </div>
+      )}
+      {roster.map((o) => {
+        const pct = Math.round(o.lowerBound * 100);
+        const cls =
+          "auto-opp" +
+          (o.status === "current" ? " auto-opp--current" : "") +
+          (o.status === "beaten" ? " auto-opp--beaten" : "") +
+          (o.id === focusId ? " auto-opp--focus" : "");
+        return (
+          <button key={o.id} className={cls} onClick={() => onFocus(o.id)}>
+            <span className="auto-opp-name">{o.name}</span>
+            <span className="auto-opp-record">
+              {o.blue}–{o.red}
+              {o.ties ? ` · ${o.ties} tie${o.ties === 1 ? "" : "s"}` : ""}
+            </span>
+            <span className="auto-opp-wilson" title="Wilson 95% lower bound of Blue's decided win rate (needs > 60%)">
+              {o.blue + o.red ? `${pct}% floor` : "—"}
+            </span>
+            <span className={"auto-opp-badge auto-opp-badge--" + o.status}>
+              {o.status === "beaten" ? "beaten ✓" : o.status === "current" ? "current" : "pending"}
+            </span>
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -359,22 +573,29 @@ export default function AutoMode() {
 function TopCombos({
   combos,
   blueName,
+  focusName,
   onOpen,
 }: {
   combos: ComboWin[];
   blueName: string;
+  focusName: string;
   onOpen: (n: number) => void;
 }) {
   if (!combos.length) {
     return (
       <p className="auto-note auto-plan-hint--center">
-        Top winning combinations appear here once Blue wins a few games.
+        {focusName
+          ? `Top winning combinations vs ${focusName} appear here once Blue wins a few games.`
+          : "Top winning combinations appear here once Blue wins a few games."}
       </p>
     );
   }
   return (
     <div className="auto-combos">
-      <div className="auto-combos-title">Top winning combinations · {blueName}</div>
+      <div className="auto-combos-title">
+        Top winning combinations · {blueName}
+        {focusName ? ` vs ${focusName}` : ""}
+      </div>
       {combos.map((c, i) => {
         const missing = c.wins - c.replays.length;
         return (
@@ -459,6 +680,9 @@ function TeamUpload({
   disabled,
   onLoad,
   onClear,
+  titleText,
+  ctaText,
+  noteText,
 }: {
   accent: "blue" | "red";
   label: string;
@@ -466,6 +690,9 @@ function TeamUpload({
   disabled: boolean;
   onLoad: (t: LoadedTeam) => void;
   onClear: () => void;
+  titleText?: string; // overrides the "{label} — upload a team" heading (e.g. roster "add" mode)
+  ctaText?: string; // overrides the "Load team" button label
+  noteText?: string; // overrides the legality note
 }) {
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
@@ -539,7 +766,7 @@ function TeamUpload({
 
   return (
     <aside className={"custom-team-panel auto-upload auto-upload--" + accent}>
-      <div className="ct-title">{label} — upload a team</div>
+      <div className="ct-title">{titleText ?? `${label} — upload a team`}</div>
       <textarea
         className="ct-input"
         rows={3}
@@ -550,7 +777,7 @@ function TeamUpload({
       />
       <div className="auto-upload-actions">
         <button className="battle-btn" disabled={disabled || busy || !text.trim()} onClick={() => load(text)}>
-          {busy ? "Loading…" : "Load team"}
+          {busy ? "Loading…" : (ctaText ?? "Load team")}
         </button>
         <button
           type="button"
@@ -562,7 +789,9 @@ function TeamUpload({
         </button>
         <input ref={fileRef} type="file" accept=".txt,.text,text/plain" hidden onChange={onFile} />
       </div>
-      <p className="ct-note">Must be Reg M-B legal (66-EV budget, no Restricted Legendaries). Overrides the {label} dropdown.</p>
+      <p className="ct-note">
+        {noteText ?? `Must be Reg M-B legal (66-EV budget, no Restricted Legendaries). Overrides the ${label} dropdown.`}
+      </p>
       {error && <p className="ct-error">{error}</p>}
       {problems.length > 0 && (
         <div className="ct-error auto-upload-problems">
