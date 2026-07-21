@@ -1397,6 +1397,203 @@ body {
   color: #8b96c8;
 }
 
+/* ---- Roster builder ----------------------------------------------------------------------- */
+.auto-roster-build {
+  max-width: 720px;
+  margin: 1rem auto 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  text-align: left;
+}
+
+.auto-roster-title {
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: #ff8bd8;
+  text-align: center;
+}
+
+.auto-roster-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.auto-roster-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 0.75rem;
+  background: rgba(10, 15, 36, 0.6);
+  border: 1px solid rgba(255, 78, 205, 0.35);
+  border-radius: 10px;
+}
+
+.auto-roster-order {
+  font-weight: 800;
+  color: #ff8bd8;
+  font-variant-numeric: tabular-nums;
+  min-width: 1.2rem;
+  text-align: center;
+}
+
+.auto-roster-name {
+  flex: 1;
+  min-width: 0;
+  color: #e6ebff;
+  font-size: 0.95rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.auto-roster-tag {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #8b96c8;
+  border: 1px solid rgba(123, 91, 255, 0.4);
+  border-radius: 5px;
+  padding: 0.05rem 0.3rem;
+}
+
+.auto-roster-actions {
+  display: inline-flex;
+  gap: 0.3rem;
+}
+
+.auto-roster-mini {
+  padding: 0.15rem 0.5rem;
+  font-size: 0.9rem;
+  line-height: 1;
+}
+
+.auto-roster-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  justify-content: center;
+}
+
+.auto-roster-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: #c7cff2;
+  font-size: 0.88rem;
+  cursor: pointer;
+}
+
+.auto-roster-check input:disabled {
+  cursor: default;
+}
+
+/* ---- Gauntlet progress -------------------------------------------------------------------- */
+.auto-progress {
+  max-width: 720px;
+  margin: 1.25rem auto 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  text-align: left;
+}
+
+.auto-progress-title {
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: #f5f7ff;
+  text-align: center;
+}
+
+.auto-complete {
+  padding: 0.7rem 1rem;
+  border-radius: 12px;
+  background: rgba(24, 48, 30, 0.6);
+  border: 1px solid rgba(64, 224, 128, 0.5);
+  color: #c8f7d8;
+  text-align: center;
+  font-weight: 600;
+}
+
+.auto-opp {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem 0.9rem;
+  flex-wrap: wrap;
+  width: 100%;
+  padding: 0.6rem 0.9rem;
+  border-radius: 10px;
+  background: rgba(10, 15, 36, 0.6);
+  border: 1px solid rgba(123, 91, 255, 0.3);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.auto-opp:hover {
+  border-color: rgba(0, 224, 255, 0.5);
+}
+
+.auto-opp--current {
+  border-color: rgba(0, 224, 255, 0.6);
+  box-shadow: 0 0 0 1px rgba(0, 224, 255, 0.25);
+}
+
+.auto-opp--beaten {
+  border-color: rgba(64, 224, 128, 0.45);
+}
+
+.auto-opp--focus {
+  outline: 2px solid rgba(255, 139, 216, 0.5);
+  outline-offset: 1px;
+}
+
+.auto-opp-name {
+  flex: 1;
+  min-width: 8rem;
+  color: #e6ebff;
+  font-size: 0.95rem;
+}
+
+.auto-opp-record,
+.auto-opp-wilson {
+  color: #aeb8e8;
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.auto-opp-badge {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0.15rem 0.5rem;
+  border-radius: 6px;
+  white-space: nowrap;
+}
+
+.auto-opp-badge--pending {
+  color: #8b96c8;
+  border: 1px solid rgba(123, 91, 255, 0.35);
+}
+
+.auto-opp-badge--current {
+  color: #dff6ff;
+  border: 1px solid rgba(0, 224, 255, 0.5);
+  background: rgba(0, 224, 255, 0.12);
+}
+
+.auto-opp-badge--beaten {
+  color: #c8f7d8;
+  border: 1px solid rgba(64, 224, 128, 0.5);
+  background: rgba(64, 224, 128, 0.12);
+}
+
 .auto-note {
   margin: 1.25rem auto 0;
   max-width: 640px;
