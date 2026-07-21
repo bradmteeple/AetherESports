@@ -111,6 +111,37 @@ def level_from_int(value: int) -> Level:
         ) from None
 
 
+def method_save_dir(
+    results_path: str | Path,
+    method: str,
+    reg: str | None,
+    num_teams: int | None,
+    run_id: int,
+) -> Path:
+    """
+    Directory holding a training run's checkpoints.
+
+    Mirrors the layout used by ``train.py`` / ``play.py`` / ``eval.py``: the
+    ``bc`` pretraining model lives directly under
+    ``results/saves_bc/seed<run_id>``, while every other method is additionally
+    nested by regulation and team count.
+    """
+    d = Path(results_path) / f"saves_{method}"
+    if method != "bc":
+        d = d / (f"reg_{reg}" if reg is not None else "reg_all")
+        if num_teams is not None:
+            d = d / f"{num_teams}_teams"
+    return d / f"seed{run_id}"
+
+
+def _int_stem(path: Path) -> int | None:
+    """Integer filename stem, or None if it is not an integer."""
+    try:
+        return int(path.stem)
+    except ValueError:
+        return None
+
+
 def resolve_latest_checkpoint(
     results_path: str | Path,
     method: str,
@@ -119,25 +150,24 @@ def resolve_latest_checkpoint(
     run_id: int,
 ) -> Path:
     """
-    Return the newest numbered checkpoint for a training run.
+    Return the newest *learner* checkpoint (highest non-negative integer stem).
 
-    Mirrors the checkpoint-directory layout used by ``play.py`` / ``eval.py``:
-    ``bc`` models live directly under ``results/saves_bc/seed<run_id>`` while
-    RL methods are additionally nested by regulation and team count. The latest
-    checkpoint is the one with the highest integer filename stem.
+    The fixed-opponent file ``-1.zip`` used by exploiter training is excluded,
+    so this never returns the frozen opponent as a playable policy.
 
     Raises:
         FileNotFoundError: if the saves directory does not exist.
-        IndexError: if the directory exists but contains no checkpoints.
+        IndexError: if the directory exists but has no learner checkpoint.
     """
-    method_dir = Path(results_path) / f"saves_{method}"
-    if method != "bc":
-        method_dir = method_dir / (f"reg_{reg}" if reg is not None else "reg_all")
-        if num_teams is not None:
-            method_dir = method_dir / f"{num_teams}_teams"
-    saves_path = method_dir / f"seed{run_id}"
-    checkpoints = sorted(saves_path.iterdir(), key=lambda p: int(p.stem))
-    return checkpoints[-1]
+    saves_path = method_save_dir(results_path, method, reg, num_teams, run_id)
+    checkpoints = [
+        p
+        for p in saves_path.iterdir()
+        if p.suffix == ".zip" and (_int_stem(p) is not None and _int_stem(p) >= 0)
+    ]
+    if not checkpoints:
+        raise IndexError(f"no learner checkpoint in {saves_path}")
+    return max(checkpoints, key=lambda p: _int_stem(p))
 
 
 def _resolve_or_download_checkpoint(

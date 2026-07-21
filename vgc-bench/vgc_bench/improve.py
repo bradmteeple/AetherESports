@@ -1,34 +1,32 @@
 """
-Self-improvement loop for the Level 3 opponent (learns from YOUR games).
+Self-improvement loop for the Level 3 opponent.
 
-Turns your own games against the bot into a stronger, personalized Level 3
-policy by (1) behavior-cloning a model of how you play and (2) training a new
-policy to exploit that model. It orchestrates the existing, tested module entry
-points -- nothing here re-implements training:
+Level 3 is built in two layers:
 
-    logs2trajs  ->  pretrain (a model of you)  ->  train --exploiter (beats you)
+  1. FOUNDATION -- two AI bots playing each other (self-play / PSRO). This is the
+     strong, general base policy, trained with train.py's self-play family and
+     initialized from behavior cloning. It is expensive, so it is built once and
+     reused across many adaptation passes.
+  2. ADAPTATION -- on top of that foundation, learn to exploit how *you* play:
+     behavior-clone a model of your games, freeze it as the exploiter's fixed
+     opponent (-1.zip), and continue training the foundation policy to beat it.
 
-Level 3 (see ``vgc_bench/src/levels.py`` and ``play.py``) always loads the
-newest checkpoint in its saves directory. The exploiter writes to method
-``bc_ex``, so after running this you face the improved bot with::
+So Level 3 = "a self-play champion, then sharpened against you". It orchestrates
+the existing tested entry points; nothing here re-implements training:
 
-    python -m vgc_bench.play --username <name> --reg mb --level 3 --method bc_ex
+    (foundation)  train --self_play --behavior_clone
+    (model of you) logs2trajs -> pretrain
+    (adaptation)  seed exploiter from the foundation + your model -> train --exploiter
 
-Run it again after more games and it keeps compounding -- each pass refreshes the
-model of you and continues training the exploiter against it.
+The adapted policy is written under method ``ex``, and Level 3 always loads the
+newest checkpoint, so afterward you face it with::
+
+    python -m vgc_bench.play --username <name> --reg mb --level 3 --method ex
 
 Requirements: a CUDA GPU, the ML extras (``pip install .[dev]``), and a running
-pokemon-showdown server (the pretrain/train steps need it, exactly like
-``train.py``). Run from the repo root.
-
-Input data: your games against the bot must already be in
-``battle_logs/logs_<format>.json`` in the same shape ``scrape_logs.py`` produces
-(``{battle_id: [uploadtime, raw_log]}`` with open team sheets) -- see the README
-for how to collect them. This orchestrator does not scrape or capture games
-itself; it consumes whatever is in ``battle_logs/``.
-
-Use ``--dry-run`` to print the exact commands and resolved paths without
-executing anything (no GPU or ML dependencies needed).
+pokemon-showdown server. Run from the repo root. Input games must already be in
+``battle_logs/`` (use ``play.py --save-logs`` to capture local games). Use
+``--dry-run`` to print the exact commands and paths without executing anything.
 """
 
 import argparse
@@ -38,32 +36,31 @@ import subprocess
 import sys
 from pathlib import Path
 
-from vgc_bench.src.levels import resolve_latest_checkpoint
+from vgc_bench.src.levels import method_save_dir, resolve_latest_checkpoint
 
-# Method string the exploiter run writes under, matching train.py's tag logic
-# (behavior_clone -> "bc", LearningStyle.EXPLOITER.abbrev -> "ex", mirror matches
-# allowed, teampreview on): "bc" + "ex" == "bc_ex".
-EXPLOITER_METHOD = "bc_ex"
+# Self-play foundation styles (two bots playing each other) -> train.py flag and
+# the resulting checkpoint method tag ("bc" init + LearningStyle.abbrev).
+FOUNDATION_STYLES = {
+    "self_play": "bc_sp",
+    "double_oracle": "bc_do",
+    "fictitious_play": "bc_fp",
+}
+# Method the adaptation (exploiter, seeded from the foundation) writes under.
+ADAPT_METHOD = "ex"
 
 
-def exploiter_save_dir(
-    results_path: str | Path,
-    reg: str | None,
-    num_teams: int | None,
-    run_id: int,
-) -> Path:
-    """
-    Directory where ``train --exploiter --behavior_clone`` writes checkpoints.
-
-    Mirrors the layout built in ``train.py`` for the exploiter method so the
-    fixed opponent (``-1.zip``) is placed exactly where training expects it and
-    Level 3 (``--method bc_ex``) later finds the learner's checkpoints.
-    """
-    d = Path(results_path) / f"saves_{EXPLOITER_METHOD}"
-    d = d / (f"reg_{reg}" if reg is not None else "reg_all")
-    if num_teams is not None:
-        d = d / f"{num_teams}_teams"
-    return d / f"seed{run_id}"
+def _has_learner_checkpoint(save_dir: Path) -> bool:
+    """True if a directory already holds a >=0 numbered checkpoint."""
+    if not save_dir.is_dir():
+        return False
+    for p in save_dir.iterdir():
+        if p.suffix == ".zip":
+            try:
+                if int(p.stem) >= 0:
+                    return True
+            except ValueError:
+                continue
+    return False
 
 
 def _battle_logs_present(battle_logs_dir: Path) -> bool:
@@ -86,7 +83,10 @@ def improve(
     num_teams: int | None,
     port: int,
     device: str,
-    total_steps: int,
+    adapt_steps: int,
+    foundation: str,
+    foundation_steps: int,
+    rebuild_foundation: bool,
     num_workers: int,
     only_winner: bool,
     min_rating: int | None,
@@ -94,90 +94,97 @@ def improve(
     results_path: str | Path = "results",
     dry_run: bool = False,
 ) -> None:
-    """
-    Run one self-improvement pass, learning from games in ``battle_logs/``.
-
-    Steps (each an existing entry point): convert your logs to trajectories,
-    behavior-clone a model of your play, install it as the exploiter's fixed
-    opponent (``-1.zip``), then exploiter-train a stronger Level 3 policy.
-    """
+    """Run one self-improvement pass: (re)build the foundation, then adapt to you."""
     py = sys.executable
-    logs2trajs = [py, "-m", "vgc_bench.logs2trajs", "--num_workers", str(num_workers)]
-    if only_winner:
-        logs2trajs.append("--only_winner")
-    if min_rating is not None:
-        logs2trajs += ["--min_rating", str(min_rating)]
+    foundation_method = FOUNDATION_STYLES[foundation]
+    foundation_dir = method_save_dir(results_path, foundation_method, reg, num_teams, run_id)
+    adapt_dir = method_save_dir(results_path, ADAPT_METHOD, reg, num_teams, run_id)
 
-    pretrain = [
-        py, "-m", "vgc_bench.pretrain",
-        "--run_id", str(run_id),
-        "--port", str(port),
-        "--device", device,
-        "--num_epochs", str(num_epochs),
-    ]
+    def _reg_teams(cmd: list[str]) -> list[str]:
+        if reg is not None:
+            cmd += ["--reg", reg]
+        if num_teams is not None:
+            cmd += ["--num_teams", str(num_teams)]
+        return cmd
 
-    train = [
+    foundation_cmd = _reg_teams([
         py, "-m", "vgc_bench.train",
-        "--exploiter", "--behavior_clone",
+        f"--{foundation}", "--behavior_clone",
         "--run_id", str(run_id),
-        "--total_steps", str(total_steps),
-        "--port", str(port),
-        "--device", device,
+        "--total_steps", str(foundation_steps),
+        "--port", str(port), "--device", device,
+    ])
+    logs2trajs_cmd = [py, "-m", "vgc_bench.logs2trajs", "--num_workers", str(num_workers)]
+    if only_winner:
+        logs2trajs_cmd.append("--only_winner")
+    if min_rating is not None:
+        logs2trajs_cmd += ["--min_rating", str(min_rating)]
+    pretrain_cmd = [
+        py, "-m", "vgc_bench.pretrain",
+        "--run_id", str(run_id), "--port", str(port),
+        "--device", device, "--num_epochs", str(num_epochs),
     ]
-    if reg is not None:
-        train += ["--reg", reg]
-    if num_teams is not None:
-        train += ["--num_teams", str(num_teams)]
+    adapt_cmd = _reg_teams([
+        py, "-m", "vgc_bench.train",
+        "--exploiter",  # NOT --behavior_clone: we seed from the foundation instead
+        "--run_id", str(run_id),
+        "--total_steps", str(adapt_steps),
+        "--port", str(port), "--device", device,
+    ])
 
-    save_dir = exploiter_save_dir(results_path, reg, num_teams, run_id)
-    fixed_opponent = save_dir / "-1.zip"
+    need_foundation = rebuild_foundation or not _has_learner_checkpoint(foundation_dir)
 
     if dry_run:
-        print("[dry-run] battle_logs present:", _battle_logs_present(Path("battle_logs")))
-        print("[dry-run] 1) convert logs :", " ".join(logs2trajs))
-        print("[dry-run] 2) model of you :", " ".join(pretrain))
-        print(f"[dry-run] 3) install fixed opponent -> {fixed_opponent}")
-        print("[dry-run] 4) exploiter    :", " ".join(train))
-        print(
-            f"[dry-run] then: python -m vgc_bench.play --reg {reg or '<reg>'} "
-            f"--level 3 --method {EXPLOITER_METHOD} --run_id {run_id}"
-            + (f" --num_teams {num_teams}" if num_teams is not None else "")
-        )
+        print(f"[dry-run] foundation ({foundation}) dir: {foundation_dir}")
+        print(f"[dry-run]   {'BUILD' if need_foundation else 'reuse existing'}: {' '.join(foundation_cmd)}")
+        print(f"[dry-run] model of you : {' '.join(logs2trajs_cmd)}")
+        print(f"[dry-run]              : {' '.join(pretrain_cmd)}")
+        print(f"[dry-run] seed adapt dir {adapt_dir}: <foundation latest> -> 0.zip (if empty), <your model> -> -1.zip")
+        print(f"[dry-run] adapt        : {' '.join(adapt_cmd)}")
+        print(f"[dry-run] then: python -m vgc_bench.play --reg {reg or '<reg>'} "
+              f"--level 3 --method {ADAPT_METHOD} --run_id {run_id}"
+              + (f" --num_teams {num_teams}" if num_teams is not None else ""))
         return
 
     if not _battle_logs_present(Path("battle_logs")):
         raise SystemExit(
-            "No usable logs in battle_logs/. Add your games against the bot as "
-            "battle_logs/logs_<format>.json (see the README) before improving."
+            "No usable logs in battle_logs/. Capture games with "
+            "`play.py --save-logs` (see the README) before improving."
         )
 
-    print(">> [1/4] Converting your games to trajectories ...")
-    subprocess.run(logs2trajs, check=True)
+    if need_foundation:
+        print(f">> [1/4] Building the self-play foundation ({foundation}: two bots playing each other) ...")
+        subprocess.run(foundation_cmd, check=True)
+    else:
+        print(f">> [1/4] Reusing existing {foundation} foundation at {foundation_dir}")
 
     print(">> [2/4] Behavior-cloning a model of how you play ...")
-    subprocess.run(pretrain, check=True)
+    subprocess.run(logs2trajs_cmd, check=True)
+    subprocess.run(pretrain_cmd, check=True)
 
-    print(">> [3/4] Installing that model as the exploiter's fixed opponent ...")
+    print(">> [3/4] Seeding the adaptation from the foundation + your model ...")
+    foundation_ckpt = resolve_latest_checkpoint(results_path, foundation_method, reg, num_teams, run_id)
     user_model = resolve_latest_checkpoint(results_path, "bc", reg, None, run_id)
-    save_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(user_model, fixed_opponent)
-    print(f"   {user_model} -> {fixed_opponent}")
+    adapt_dir.mkdir(parents=True, exist_ok=True)
+    if not _has_learner_checkpoint(adapt_dir):
+        shutil.copyfile(foundation_ckpt, adapt_dir / "0.zip")
+        print(f"   foundation {foundation_ckpt} -> {adapt_dir / '0.zip'}")
+    shutil.copyfile(user_model, adapt_dir / "-1.zip")
+    print(f"   your model {user_model} -> {adapt_dir / '-1.zip'} (fixed opponent)")
 
-    print(">> [4/4] Training a Level 3 policy to exploit your play ...")
-    subprocess.run(train, check=True)
+    print(">> [4/4] Adapting the foundation to exploit your play ...")
+    subprocess.run(adapt_cmd, check=True)
 
-    latest = resolve_latest_checkpoint(results_path, EXPLOITER_METHOD, reg, num_teams, run_id)
+    latest = resolve_latest_checkpoint(results_path, ADAPT_METHOD, reg, num_teams, run_id)
     print(f"Done. New Level 3 checkpoint: {latest}")
-    print(
-        f"Play it: python -m vgc_bench.play --reg {reg or '<reg>'} --level 3 "
-        f"--method {EXPLOITER_METHOD} --run_id {run_id}"
-        + (f" --num_teams {num_teams}" if num_teams is not None else "")
-    )
+    print(f"Play it: python -m vgc_bench.play --reg {reg or '<reg>'} --level 3 "
+          f"--method {ADAPT_METHOD} --run_id {run_id}"
+          + (f" --num_teams {num_teams}" if num_teams is not None else ""))
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Improve the Level 3 opponent from your games against it."
+        description="Improve Level 3: a self-play foundation, then adapted to your games."
     )
     parser.add_argument("--reg", type=str, default=None, help="VGC regulation, e.g. mb")
     parser.add_argument("--run_id", type=int, default=1, help="run/seed id")
@@ -185,18 +192,31 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=8000, help="showdown server port")
     parser.add_argument("--device", type=str, default="cuda:0", help="torch device")
     parser.add_argument(
-        "--total_steps", type=int, default=983_040, help="exploiter training timesteps"
+        "--foundation",
+        choices=sorted(FOUNDATION_STYLES),
+        default="self_play",
+        help="how the two bots play each other to build the base policy "
+        "(self_play = two copies vs each other; double_oracle / fictitious_play "
+        "= population self-play, stronger but heavier). Default self_play.",
+    )
+    parser.add_argument(
+        "--foundation_steps", type=int, default=9_830_400,
+        help="training timesteps for the foundation (built once, reused).",
+    )
+    parser.add_argument(
+        "--rebuild_foundation", action="store_true",
+        help="retrain the foundation even if one already exists.",
+    )
+    parser.add_argument(
+        "--adapt_steps", type=int, default=983_040,
+        help="training timesteps for each adaptation pass against your model.",
     )
     parser.add_argument("--num_workers", type=int, default=1, help="log-parse workers")
-    parser.add_argument(
-        "--only_winner", action="store_true", help="only learn from games you won"
-    )
+    parser.add_argument("--only_winner", action="store_true", help="only learn from games you won")
     parser.add_argument("--min_rating", type=int, default=None, help="min Elo to include")
     parser.add_argument("--num_epochs", type=int, default=100, help="BC epochs")
     parser.add_argument(
-        "--dry-run",
-        dest="dry_run",
-        action="store_true",
+        "--dry-run", dest="dry_run", action="store_true",
         help="print commands and resolved paths without running anything",
     )
     args = parser.parse_args()
@@ -207,7 +227,10 @@ if __name__ == "__main__":
         args.num_teams,
         args.port,
         args.device,
-        args.total_steps,
+        args.adapt_steps,
+        args.foundation,
+        args.foundation_steps,
+        args.rebuild_foundation,
         args.num_workers,
         args.only_winner,
         args.min_rating,
