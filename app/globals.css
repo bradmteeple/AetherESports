@@ -1278,86 +1278,123 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
-.auto-leads {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-  gap: 1rem;
+/* Top winning combinations (lead + back) with clickable winning-replay chips. */
+.auto-combos {
   max-width: 720px;
   margin: 1.25rem auto 0;
-}
-
-.auto-lead-col {
-  background: rgba(10, 15, 36, 0.6);
-  border: 1px solid rgba(123, 91, 255, 0.3);
-  border-radius: 12px;
-  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
   text-align: left;
 }
 
-.auto-lead-col--blue {
-  border-color: rgba(0, 224, 255, 0.5);
-}
-
-.auto-lead-col--red {
-  border-color: rgba(255, 78, 205, 0.45);
-}
-
-.auto-lead-title {
-  font-size: 0.85rem;
-  font-weight: 700;
-  text-align: center;
-  margin-bottom: 0.6rem;
-  color: #cdd5ff;
-}
-
-.auto-lead-col--blue .auto-lead-title {
-  color: #00e0ff;
-}
-
-.auto-lead-col--red .auto-lead-title {
-  color: #ff8bd8;
-}
-
-.auto-lead-empty {
-  color: #8b96c8;
-  font-size: 0.85rem;
-  text-align: center;
-}
-
-.auto-lead-list {
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: 0.3rem;
-}
-
-.auto-lead-row {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 0.75rem;
+.auto-combos-title {
   font-size: 0.9rem;
-  padding: 0.25rem 0;
-  border-bottom: 1px solid rgba(123, 91, 255, 0.12);
+  font-weight: 700;
+  color: #00e0ff;
+  text-align: center;
 }
 
-.auto-lead-row:last-child {
-  border-bottom: none;
+.auto-combo {
+  background: rgba(10, 15, 36, 0.6);
+  border: 1px solid rgba(0, 224, 255, 0.4);
+  border-radius: 12px;
+  padding: 0.8rem 1rem;
 }
 
-.auto-lead-combo {
-  color: #e6ebff;
+.auto-combo-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.9rem;
+}
+
+.auto-combo-rank {
+  font-weight: 800;
+  color: #00e0ff;
+  font-size: 1.05rem;
+}
+
+.auto-combo-config {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1.1rem;
   flex: 1;
   min-width: 0;
-  overflow-wrap: anywhere; /* the 4-mon selection string can be long */
-  line-height: 1.3;
 }
 
-.auto-lead-count {
+.auto-combo-part {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.auto-combo-part-label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #8b96c8;
+}
+
+.auto-combo-mons {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.auto-combo-mon {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  font-size: 0.9rem;
+  color: #e6ebff;
+  white-space: nowrap;
+}
+
+.auto-combo-mon .mon-thumb {
+  width: 26px;
+  height: 26px;
+}
+
+.auto-combo-record {
   color: #aeb8e8;
+  font-size: 0.85rem;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
-  flex-shrink: 0;
+}
+
+.auto-combo-replays {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.6rem;
+}
+
+.auto-combo-replays-label {
+  font-size: 0.8rem;
+  color: #8b96c8;
+}
+
+.auto-combo-chip {
+  font: inherit;
+  font-size: 0.82rem;
+  padding: 0.2rem 0.5rem;
+  border-radius: 6px;
+  cursor: pointer;
+  border: 1px solid rgba(0, 224, 255, 0.5);
+  background: rgba(0, 224, 255, 0.12);
+  color: #dff6ff;
+  font-variant-numeric: tabular-nums;
+}
+
+.auto-combo-chip:hover {
+  background: rgba(0, 224, 255, 0.25);
+}
+
+.auto-combo-more {
+  font-size: 0.78rem;
+  color: #8b96c8;
 }
 
 .auto-note {
@@ -1365,25 +1402,6 @@ body {
   max-width: 640px;
   color: #8b96c8;
   font-size: 0.9rem;
-}
-
-/* ---------- Auto Battle: game plan CTA + flowchart page ---------- */
-.auto-plan-cta {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 0.35rem;
-  margin: 0.25rem 0 1.25rem;
-}
-
-.auto-plan-link {
-  text-decoration: none;
-  border-color: rgba(123, 91, 255, 0.6);
-  background: rgba(123, 91, 255, 0.2);
-}
-
-.auto-plan-link:hover {
-  background: rgba(123, 91, 255, 0.35);
 }
 
 .auto-plan-hint {

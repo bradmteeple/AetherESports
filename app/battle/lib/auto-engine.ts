@@ -7,21 +7,21 @@
 //
 // The search is heavy and deliberately runs slowly for accuracy, so the game loop lives in a Web
 // Worker (mcts-worker.ts). This controller is the main-thread client: it forwards start/stop/reset,
-// and folds each finished game the worker sends back into the running tally, the win-rate selection
-// columns, the learned opponent-threat model (for the game plan), and the replay window. Those
-// aggregates stay here so getReplay()/bluePlan() remain synchronous for the page.
+// folds each finished game into the running tally, tracks the top winning "combinations" (a specific
+// lead pair + back pair) and their winning replays, and keeps a rolling window of game logs so any
+// battle can be watched back. Those aggregates live here so getTally()/getReplay() are synchronous.
 
 import { FORMATS } from "./formats";
-import { analyzeBluePlan } from "./game-plan-analyze";
-import type { PlanData } from "./game-plan";
 import type { WorkerGame, WorkerMsg } from "./mcts-worker";
 
-type Book = Record<string, Record<string, number>>;
-
-export interface ComboStat {
-  combo: string; // the 4 brought Pokémon, sorted + joined: "A + B + C + D" (order-independent)
-  games: number; // games this selection was brought
-  wins: number; // games this selection won
+// A winning "combination" for Blue: a specific lead pair + back pair (the exact 4 brought, split into
+// the two that led and the two held in the back). Ranked by how many games it won.
+export interface ComboWin {
+  lead: string; // "A + B" — the two Pokémon led with
+  back: string; // "C + D" — the two brought but not led
+  games: number; // games this exact combination was brought
+  wins: number; // games this combination won
+  replays: number[]; // winning game numbers still in the replay window (watchable), newest first
 }
 
 export interface Tally {
@@ -32,8 +32,7 @@ export interface Tally {
   searching: boolean; // is the searcher currently thinking?
   turn: number; // current game's turn (progress indicator)
   sims: number; // search iterations spent on the last decision
-  topBlue: ComboStat[]; // Blue's top winning 4-of-6 selections (by win rate)
-  topRed: ComboStat[]; // Red's top winning 4-of-6 selections
+  topCombos: ComboWin[]; // Blue's top 2 winning combinations (by wins)
   replayMin: number | null; // smallest game number still available to replay (null if none)
   replayMax: number | null; // latest game number available to replay
   error: string | null; // set if the worker couldn't run the matchup (e.g. an unrunnable team)
@@ -41,10 +40,11 @@ export interface Tally {
 
 export type GameResult = "blue" | "red" | "tie";
 
-// A finished game's play-by-play, kept so the user can type a number and watch that battle back.
+// A finished game's play-by-play, kept so any battle can be watched back.
 export interface GameLog {
   n: number; // 1-indexed game number (matches Tally.games at the moment it finished)
   result: GameResult;
+  blueCombo: string | null; // "A + B + C + D" of the four Blue brought
   blueLead: string | null; // "A + B" of the two Blue led with
   redLead: string | null; // "A + B" of the two Red led with
   lines: string[]; // raw Showdown protocol lines (public battle log)
@@ -54,27 +54,16 @@ export interface GameLog {
 // a few MB while covering far more than a user would scroll back to after pressing Stop.
 const REPLAY_CAP = 500;
 
-function mergeBook(dst: Book, src: Book) {
-  for (const [sp, moves] of Object.entries(src)) {
-    const d = (dst[sp] ??= {});
-    for (const [mv, n] of Object.entries(moves)) d[mv] = (d[mv] || 0) + n;
-  }
+// The two Pokémon brought but not led = the 4 brought minus the 2 leads. Null unless exactly 2
+// remain (guards against any species-name mismatch between the packed team and the battle log).
+function backOf(combo: string | null, lead: string | null): string | null {
+  if (!combo || !lead) return null;
+  const leadSet = new Set(lead.split(" + "));
+  const back = combo.split(" + ").filter((s) => !leadSet.has(s));
+  return back.length === 2 ? back.slice().sort().join(" + ") : null;
 }
 
-// All selections ranked by win rate (tiebreak: more wins — i.e. larger sample — then name).
-function sortByWinRate(map: Map<string, { games: number; wins: number }>): ComboStat[] {
-  const rate = (c: { games: number; wins: number }) => (c.games ? c.wins / c.games : 0);
-  return Array.from(map.entries())
-    .map(([combo, { games, wins }]) => ({ combo, games, wins }))
-    .sort((x, y) => rate(y) - rate(x) || y.wins - x.wins || x.combo.localeCompare(y.combo));
-}
-
-// By raw frequency — used for "the Red leads you face most", where sample size decides relevance.
-function sortByGames(map: Map<string, { games: number; wins: number }>): ComboStat[] {
-  return Array.from(map.entries())
-    .map(([combo, { games, wins }]) => ({ combo, games, wins }))
-    .sort((x, y) => y.games - x.games || x.combo.localeCompare(y.combo));
-}
+const comboKey = (lead: string, back: string) => `${lead}||${back}`;
 
 interface ControllerOpts {
   onUpdate: (tally: Tally) => void;
@@ -94,14 +83,9 @@ export class AutoBattleController {
   private turn = 0;
   private sims = 0;
   private lastError: string | null = null;
-  private readonly bookBlue: Book = {}; // Blue's learned model of Red (for the game plan)
-  private readonly bookRed: Book = {};
-  private readonly comboBlue = new Map<string, { games: number; wins: number }>();
-  private readonly comboRed = new Map<string, { games: number; wins: number }>();
-  // Lead pairs, always counted from BLUE's perspective (did Blue win?).
-  private readonly blueLeads = new Map<string, { games: number; wins: number }>();
-  private readonly redLeads = new Map<string, { games: number; wins: number }>();
-  // Rolling window of the most recent games' logs (oldest first), so Stop → "view battle N" works.
+  // Blue's combinations (lead+back) → games/wins. Keyed by `${lead}||${back}`.
+  private readonly comboWinsBlue = new Map<string, { lead: string; back: string; games: number; wins: number }>();
+  // Rolling window of the most recent games' logs (oldest first), so any battle can be watched back.
   private readonly replays: GameLog[] = [];
   private lastEmit = 0;
 
@@ -122,7 +106,7 @@ export class AutoBattleController {
     return this.worker;
   }
 
-  /** Begin (or resume) the loop. Tally and learning carry over from where they left off. */
+  /** Begin (or resume) the loop. Tally carries over from where it left off. */
   start() {
     if (this.destroyed || this.running) return;
     this.running = true;
@@ -132,25 +116,20 @@ export class AutoBattleController {
     this.emit(true);
   }
 
-  /** Pause after the in-flight game finishes. Tally/learning are kept for resume. */
+  /** Pause after the in-flight game finishes. Tally is kept for resume. */
   stop() {
     this.running = false;
     this.worker?.postMessage({ type: "stop" });
     this.emit(true);
   }
 
-  /** Clear the tally and learning back to a fresh run (only meaningful while stopped). */
+  /** Clear the tally back to a fresh run (only meaningful while stopped). */
   reset() {
     this.counts = { blue: 0, red: 0, ties: 0, games: 0 };
     this.turn = 0;
     this.sims = 0;
     this.lastError = null;
-    for (const k of Object.keys(this.bookBlue)) delete this.bookBlue[k];
-    for (const k of Object.keys(this.bookRed)) delete this.bookRed[k];
-    this.comboBlue.clear();
-    this.comboRed.clear();
-    this.blueLeads.clear();
-    this.redLeads.clear();
+    this.comboWinsBlue.clear();
     this.replays.length = 0;
     this.worker?.postMessage({ type: "reset" });
     this.emit(true);
@@ -171,22 +150,6 @@ export class AutoBattleController {
   /** The stored play-by-play for game `n`, or null if it's out of the kept window. */
   getReplay(n: number): GameLog | null {
     return this.replays.find((r) => r.n === n) ?? null;
-  }
-
-  /** Blue's game plan vs Red, derived from the run so far (best selection, learned threats). */
-  bluePlan(blueName: string, redName: string): PlanData {
-    return analyzeBluePlan({
-      blueTeamPacked: this.p1Team,
-      blueTeamName: blueName,
-      redTeamName: redName,
-      blueWins: this.counts.blue,
-      redWins: this.counts.red,
-      games: this.counts.games,
-      combos: sortByWinRate(this.comboBlue),
-      blueLeads: sortByWinRate(this.blueLeads),
-      redLeads: sortByGames(this.redLeads),
-      book: this.bookBlue,
-    });
   }
 
   private onMessage(msg: WorkerMsg) {
@@ -213,38 +176,52 @@ export class AutoBattleController {
     else this.counts.ties++;
     this.counts.games++;
 
-    // Each side's selection played one game; the winning side's selection also won it.
-    this.recordCombo(this.comboBlue, o.blueCombo, o.result === "blue");
-    this.recordCombo(this.comboRed, o.redCombo, o.result === "red");
-    // Lead pairs — both tracked from Blue's perspective.
-    this.recordCombo(this.blueLeads, o.blueLead, o.result === "blue");
-    this.recordCombo(this.redLeads, o.redLead, o.result === "blue");
+    // Tally Blue's exact combination (lead + back) for this game.
+    const back = backOf(o.blueCombo, o.blueLead);
+    if (o.blueLead && back) {
+      const key = comboKey(o.blueLead, back);
+      const cur = this.comboWinsBlue.get(key) ?? { lead: o.blueLead, back, games: 0, wins: 0 };
+      cur.games++;
+      if (o.result === "blue") cur.wins++;
+      this.comboWinsBlue.set(key, cur);
+    }
 
     // Rolling replay window (evict the oldest past the cap).
     this.replays.push({
       n: this.counts.games,
       result: o.result,
+      blueCombo: o.blueCombo,
       blueLead: o.blueLead,
       redLead: o.redLead,
       lines: o.lines,
     });
     if (this.replays.length > REPLAY_CAP) this.replays.shift();
-
-    // Fold this game's observations into each side's learned model (feeds the game plan).
-    mergeBook(this.bookBlue, o.obsBlue);
-    mergeBook(this.bookRed, o.obsRed);
   }
 
-  private recordCombo(
-    map: Map<string, { games: number; wins: number }>,
-    combo: string | null,
-    won: boolean
-  ) {
-    if (!combo) return;
-    const cur = map.get(combo) ?? { games: 0, wins: 0 };
-    cur.games++;
-    if (won) cur.wins++;
-    map.set(combo, cur);
+  // Blue's top 2 winning combinations by wins, each with the winning game numbers still watchable.
+  private topCombos(): ComboWin[] {
+    return Array.from(this.comboWinsBlue.values())
+      .filter((c) => c.wins > 0)
+      .sort(
+        (a, b) =>
+          b.wins - a.wins ||
+          b.games - a.games ||
+          (a.lead + a.back).localeCompare(b.lead + b.back)
+      )
+      .slice(0, 2)
+      .map((c) => {
+        const key = comboKey(c.lead, c.back);
+        const replays = this.replays
+          .filter(
+            (r) =>
+              r.result === "blue" &&
+              r.blueLead != null &&
+              comboKey(r.blueLead, backOf(r.blueCombo, r.blueLead) ?? " ") === key
+          )
+          .map((r) => r.n)
+          .sort((x, y) => y - x); // newest first
+        return { lead: c.lead, back: c.back, games: c.games, wins: c.wins, replays };
+      });
   }
 
   private snapshot(): Tally {
@@ -253,8 +230,7 @@ export class AutoBattleController {
       searching: this.running,
       turn: this.turn,
       sims: this.sims,
-      topBlue: sortByWinRate(this.comboBlue),
-      topRed: sortByWinRate(this.comboRed),
+      topCombos: this.topCombos(),
       replayMin: this.replays[0]?.n ?? null,
       replayMax: this.replays[this.replays.length - 1]?.n ?? null,
       error: this.lastError,

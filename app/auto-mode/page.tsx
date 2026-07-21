@@ -1,11 +1,9 @@
 "use client";
 
-import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AutoBattleController, ComboStat, GameResult, Tally } from "../battle/lib/auto-engine";
+import type { AutoBattleController, ComboWin, GameResult, Tally } from "../battle/lib/auto-engine";
 import { buildReplayFrames, type ReplayFrame, type RosterEntry } from "../battle/lib/auto-replay";
 import type { ActiveMon, BoardState } from "../battle/lib/protocol";
-import { encodePlan } from "../battle/lib/game-plan";
 import { pokeSprite, pokeThumb } from "../battle/lib/sprites";
 import { REG_MB_TEAMS, teamById } from "../battle/lib/reg-mb-teams";
 import { FORMATS } from "../battle/lib/formats";
@@ -17,9 +15,6 @@ interface Replay {
   frames: ReplayFrame[];
 }
 
-// Blue needs a reasonable sample before its game plan is worth generating.
-const MIN_PLAN_GAMES = 20;
-
 const ZERO: Tally = {
   blue: 0,
   red: 0,
@@ -28,8 +23,7 @@ const ZERO: Tally = {
   searching: false,
   turn: 0,
   sims: 0,
-  topBlue: [],
-  topRed: [],
+  topCombos: [],
   replayMin: null,
   replayMax: null,
   error: null,
@@ -53,7 +47,6 @@ export default function AutoMode() {
   const [redId, setRedId] = useState(DEFAULT_RED);
   const [blueUpload, setBlueUpload] = useState<LoadedTeam | null>(null); // uploaded team overrides preset
   const [redUpload, setRedUpload] = useState<LoadedTeam | null>(null);
-  const [planUrl, setPlanUrl] = useState<string | null>(null);
   const [replayNum, setReplayNum] = useState<string>(""); // the battle number typed in
   const [replay, setReplay] = useState<Replay | null>(null); // the battle currently shown
   const [replayError, setReplayError] = useState<string | null>(null);
@@ -84,7 +77,6 @@ export default function AutoMode() {
   useEffect(() => {
     setRun(false);
     setTally(ZERO);
-    setPlanUrl(null);
     setReplay(null);
     setReplayError(null);
     setReplayNum("");
@@ -98,7 +90,6 @@ export default function AutoMode() {
   // Start creates the engine lazily on click (the @pkmn chunk is large — never gate the button
   // behind it). The button flips to running immediately; the loop begins once the chunk loads.
   const start = useCallback(async () => {
-    setPlanUrl(null);
     setReplay(null);
     setReplayError(null);
     setRun(true);
@@ -134,28 +125,24 @@ export default function AutoMode() {
     const c = controllerRef.current;
     c?.stop();
     setRun(false);
-    // Generate Blue's game plan from the run so far and expose the flowchart link.
+    // Default the "view a battle" box to the most recent game so a click just works.
     if (c) {
-      const plan = c.bluePlan(teamById(blueId)?.name ?? "Blue", teamById(redId)?.name ?? "Red");
-      setPlanUrl(plan.games >= MIN_PLAN_GAMES ? `/auto-mode/plan?d=${encodePlan(plan)}` : null);
-      // Default the "view a battle" box to the most recent game so a click just works.
       const t = c.getTally();
       if (t.replayMax != null) setReplayNum(String(t.replayMax));
     }
-  }, [blueId, redId, setRun]);
+  }, [setRun]);
 
   const reset = useCallback(() => {
-    setPlanUrl(null);
     setReplay(null);
     setReplayError(null);
     setReplayNum("");
     controllerRef.current?.reset();
   }, []);
 
-  // Look up the typed battle number and render its play-by-play.
-  const viewBattle = useCallback(() => {
+  // Load battle `n` and render its play-by-play in the viewer. Shared by the manual box and the
+  // winning-combination replay chips.
+  const openReplay = useCallback((n: number) => {
     const c = controllerRef.current;
-    const n = parseInt(replayNum, 10);
     if (!c || !Number.isFinite(n)) {
       setReplay(null);
       setReplayError("Enter a battle number.");
@@ -173,8 +160,11 @@ export default function AutoMode() {
       return;
     }
     setReplayError(null);
+    setReplayNum(String(n));
     setReplay({ n: g.n, result: g.result, frames: buildReplayFrames(g.lines) });
-  }, [replayNum]);
+  }, []);
+
+  const viewBattle = useCallback(() => openReplay(parseInt(replayNum, 10)), [replayNum, openReplay]);
 
   const blueName = uploadLabel(blueUpload) ?? teamById(blueId)?.name ?? "—";
   const redName = uploadLabel(redUpload) ?? teamById(redId)?.name ?? "—";
@@ -190,8 +180,8 @@ export default function AutoMode() {
         a forked copy of the real battle simulator: it treats each simultaneous turn as a small game
         and plays a mixed strategy, averages over the luck, and works out when to Mega Evolve on its
         own — nothing about it is scripted. It runs deliberately slowly for accuracy, so games
-        accumulate over time. It keeps a running tally, and below the score each side&apos;s top
-        winning 4-of-6 selections are labeled.
+        accumulate over time. Below the score are the two lead+back combinations Blue won the most
+        with — click any win to watch that battle.
       </p>
 
       <div className="auto-teampick">
@@ -319,20 +309,6 @@ export default function AutoMode() {
       {replayError && <p className="auto-replay-error">{replayError}</p>}
       {replay && <ReplayViewer replay={replay} blueName={blueName} redName={redName} />}
 
-      {!running && planUrl && (
-        <div className="auto-plan-cta">
-          <Link className="battle-btn auto-plan-link" href={planUrl} target="_blank" rel="noopener noreferrer">
-            🧭 View Blue&apos;s game plan →
-          </Link>
-          <span className="auto-plan-hint">Opens a shareable flowchart of how Blue played this matchup.</span>
-        </div>
-      )}
-      {!running && !planUrl && tally.games > 0 && tally.games < MIN_PLAN_GAMES && (
-        <p className="auto-plan-hint auto-plan-hint--center">
-          Run at least {MIN_PLAN_GAMES} games, then Stop to generate Blue&apos;s game plan.
-        </p>
-      )}
-
       {running && (
         <div className="auto-thinking">
           <span className="auto-thinking-dot" />
@@ -367,18 +343,94 @@ export default function AutoMode() {
         </div>
       </div>
 
-      <div className="auto-leads">
-        <WinColumn title={`Blue — top winning picks · ${blueName}`} accent="blue" combos={tally.topBlue} />
-        <WinColumn title={`Red — top winning picks · ${redName}`} accent="red" combos={tally.topRed} />
-      </div>
+      <TopCombos combos={tally.topCombos} blueName={blueName} onOpen={openReplay} />
 
       <p className="auto-note">
-        The search chooses which 4 of 6 to bring, so each side converges on its strongest selections;
-        the columns show that side&apos;s top selections by win rate (with wins/games), among picks
-        with at least {MIN_GAMES} games so the rates mean something. Changing a team or pressing Reset
-        clears the tally and starts over.
+        A &quot;combination&quot; is a specific bring-4 split into a lead pair and a back pair; the two
+        shown are the ones Blue won the most games with. Changing a team or pressing Reset clears the
+        tally. Only the most recent 500 battles are stored, so some older wins may not be watchable.
       </p>
     </div>
+  );
+}
+
+// Blue's top 2 winning combinations (a specific lead pair + back pair), each with clickable chips to
+// watch the games it won. Ranked by number of wins.
+function TopCombos({
+  combos,
+  blueName,
+  onOpen,
+}: {
+  combos: ComboWin[];
+  blueName: string;
+  onOpen: (n: number) => void;
+}) {
+  if (!combos.length) {
+    return (
+      <p className="auto-note auto-plan-hint--center">
+        Top winning combinations appear here once Blue wins a few games.
+      </p>
+    );
+  }
+  return (
+    <div className="auto-combos">
+      <div className="auto-combos-title">Top winning combinations · {blueName}</div>
+      {combos.map((c, i) => {
+        const missing = c.wins - c.replays.length;
+        return (
+          <div key={c.lead + "|" + c.back} className="auto-combo">
+            <div className="auto-combo-head">
+              <span className="auto-combo-rank">#{i + 1}</span>
+              <span className="auto-combo-config">
+                <span className="auto-combo-part">
+                  <span className="auto-combo-part-label">Lead</span>
+                  <ComboMons names={c.lead} />
+                </span>
+                <span className="auto-combo-part">
+                  <span className="auto-combo-part-label">Back</span>
+                  <ComboMons names={c.back} />
+                </span>
+              </span>
+              <span className="auto-combo-record">
+                won {c.wins.toLocaleString()} of {c.games.toLocaleString()}
+              </span>
+            </div>
+            <div className="auto-combo-replays">
+              {c.replays.length > 0 ? (
+                <>
+                  <span className="auto-combo-replays-label">Watch a win:</span>
+                  {c.replays.slice(0, 12).map((n) => (
+                    <button key={n} className="auto-combo-chip" onClick={() => onOpen(n)}>
+                      #{n.toLocaleString()}
+                    </button>
+                  ))}
+                  {missing > 0 && (
+                    <span className="auto-combo-more">
+                      +{missing.toLocaleString()} older win{missing === 1 ? "" : "s"} no longer stored
+                    </span>
+                  )}
+                </>
+              ) : (
+                <span className="auto-combo-more">Its winning replays are no longer stored.</span>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function ComboMons({ names }: { names: string }) {
+  return (
+    <span className="auto-combo-mons">
+      {names.split(" + ").map((nm, i) => (
+        <span key={i} className="auto-combo-mon">
+          <UploadThumb name={nm} />
+          {nm}
+        </span>
+      ))}
+    </span>
   );
 }
 
@@ -736,42 +788,3 @@ function ReplayRoster({
   );
 }
 
-// A selection needs at least this many games before its win rate is trusted enough to rank.
-const MIN_GAMES = 10;
-
-function WinColumn({
-  title,
-  accent,
-  combos,
-}: {
-  title: string;
-  accent: "blue" | "red";
-  combos: ComboStat[];
-}) {
-  // combos arrive sorted by win rate; keep only well-sampled ones, then label the top 3.
-  const top = combos.filter((c) => c.games >= MIN_GAMES).slice(0, 3);
-  const best = combos.reduce((m, c) => Math.max(m, c.games), 0); // progress toward the threshold
-  return (
-    <div className={"auto-lead-col auto-lead-col--" + accent}>
-      <div className="auto-lead-title">{title}</div>
-      {top.length === 0 ? (
-        <p className="auto-lead-empty">
-          Gathering data — each pick needs {MIN_GAMES.toLocaleString()}+ games
-          {best ? ` (best so far: ${best.toLocaleString()})` : ""}.
-        </p>
-      ) : (
-        <ol className="auto-lead-list">
-          {top.map((c) => (
-            <li key={c.combo} className="auto-lead-row">
-              <span className="auto-lead-combo">{c.combo}</span>
-              <span className="auto-lead-count">
-                {c.games ? `${Math.round((c.wins / c.games) * 100)}%` : "—"}
-                {c.games ? ` · ${c.wins.toLocaleString()}/${c.games.toLocaleString()}` : ""}
-              </span>
-            </li>
-          ))}
-        </ol>
-      )}
-    </div>
-  );
-}
