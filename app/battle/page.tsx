@@ -1,11 +1,23 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { BattleSnapshot, CustomTeam, MoveOption, RosterMon, SwitchOption } from "./lib/engine";
+import type { BattleSnapshot, ControllerOpts, CustomTeam, MoveOption, RosterMon, SelectedTeams, SwitchOption } from "./lib/engine";
 import type { ActiveMon, BoardState, StatBlock } from "./lib/protocol";
 import { FORMAT_LIST, FORMATS, type FormatKey } from "./lib/formats";
 import { needsTarget, targetOptions } from "./lib/choices";
 import { pokeSprite, pokeThumb } from "./lib/sprites";
+import { emptyMatchup, matchupValue, setMatchup, type Cell, type Matchup } from "./lib/matchup";
+
+// species of each set in a selected team (forme name), for the matchup grid axes
+function speciesOf(sets: any[]): string[] {
+  return (sets ?? []).map((s) => String(s?.species || s?.name || "")).filter(Boolean);
+}
+
+interface MatchupStep {
+  preTeams: SelectedTeams;
+  aiSpecies: string[];
+  playerSpecies: string[];
+}
 
 export default function BattlePage() {
   const [selectedFormat, setSelectedFormat] = useState<FormatKey>("gen9randombattle");
@@ -19,6 +31,10 @@ export default function BattlePage() {
   const [customTeam, setCustomTeam] = useState<{ packed: string; species: string[] } | null>(null);
   const [playerTeam, setPlayerTeam] = useState<{ packed: string; species: string[] } | null>(null);
   const [runningCustom, setRunningCustom] = useState<CustomTeam | undefined>(undefined);
+  const [runningOpts, setRunningOpts] = useState<ControllerOpts | undefined>(undefined);
+  // Level-3 pre-battle matchup chart step (null unless the player is filling it in).
+  const [matchupStep, setMatchupStep] = useState<MatchupStep | null>(null);
+  const [matchup, setMatchupState] = useState<Matchup>(emptyMatchup());
   const logEndRef = useRef<HTMLDivElement | null>(null);
   const chooseRef = useRef<((choice: string) => void) | null>(null);
 
@@ -47,7 +63,7 @@ export default function BattlePage() {
     (async () => {
       const { BattleController } = await import("./lib/engine");
       if (cancelled) return;
-      controller = new BattleController(runningFormat, runningLevel, (s) => setSnapshot(s), runningCustom);
+      controller = new BattleController(runningFormat, runningLevel, (s) => setSnapshot(s), runningCustom, runningOpts);
       chooseRef.current = (c) => controller!.choose(c);
     })();
 
@@ -56,27 +72,48 @@ export default function BattlePage() {
       controller?.destroy();
       chooseRef.current = null;
     };
-  }, [battleKey, runningFormat, runningLevel, started, runningCustom]);
+  }, [battleKey, runningFormat, runningLevel, started, runningCustom, runningOpts]);
 
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [snapshot?.log.length]);
 
-  const startBattle = useCallback(() => {
+  const startBattle = useCallback(async () => {
+    const custom: CustomTeam | undefined =
+      customTeam || playerTeam
+        ? { aiTeam: customTeam?.packed, playerTeam: playerTeam?.packed, doubles: selectedDoubles }
+        : undefined;
     setRunningFormat(selectedFormat);
     setRunningLevel(selectedLevel);
-    setRunningCustom(
-      customTeam || playerTeam
-        ? {
-            aiTeam: customTeam?.packed,
-            playerTeam: playerTeam?.packed,
-            doubles: selectedDoubles,
-          }
-        : undefined
-    );
+    setRunningCustom(custom);
+
+    // Level 3: pick the teams now and let the player set a matchup chart before the battle begins.
+    if (selectedLevel === 3) {
+      const { selectTeams } = await import("./lib/engine");
+      const preTeams = selectTeams(FORMATS[selectedFormat], custom);
+      setStarted(false); // tear down any battle in progress while the chart is filled in
+      setSnapshot(null);
+      setMatchupState(emptyMatchup());
+      setMatchupStep({
+        preTeams,
+        aiSpecies: speciesOf(preTeams.p2Sets),
+        playerSpecies: speciesOf(preTeams.p1Sets),
+      });
+      return;
+    }
+
+    setRunningOpts(undefined);
     setStarted(true);
     setBattleKey((k) => k + 1);
   }, [selectedFormat, selectedLevel, customTeam, playerTeam, selectedDoubles]);
+
+  const beginBattle = useCallback(() => {
+    if (!matchupStep) return;
+    setRunningOpts({ preTeams: matchupStep.preTeams, matchup });
+    setMatchupStep(null);
+    setStarted(true);
+    setBattleKey((k) => k + 1);
+  }, [matchupStep, matchup]);
 
   const choose = useCallback((c: string) => chooseRef.current?.(c), []);
 
@@ -156,7 +193,16 @@ export default function BattlePage() {
         <p className="format-note">* {FORMATS[selectedFormat].note}</p>
       )}
 
-      {!started ? (
+      {matchupStep ? (
+        <MatchupSetup
+          step={matchupStep}
+          matchup={matchup}
+          onSet={(ai, you, v) => setMatchupState((m) => setMatchup(m, ai, you, v))}
+          onAllNeutral={() => setMatchupState(emptyMatchup())}
+          onBegin={beginBattle}
+          onCancel={() => setMatchupStep(null)}
+        />
+      ) : !started ? (
         <div className="battle-loading">Choose a format and AI level above, then press ▶ Start Battle.</div>
       ) : !snapshot ? (
         <div className="battle-loading">Generating teams and starting the battle…</div>
@@ -192,6 +238,104 @@ export default function BattlePage() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// Pre-battle matchup chart for the Adaptive (Level 3) AI. Rows = the AI's Pokémon, columns = your
+// Pokémon; each cell rates the matchup FROM THE AI'S PERSPECTIVE, cycling neutral → AI favored (+) →
+// AI weak (−). The AI plays to it (see AdaptiveAI in ai.ts). Default all-neutral makes Level 3 behave
+// exactly as before.
+function MatchupSetup({
+  step,
+  matchup,
+  onSet,
+  onAllNeutral,
+  onBegin,
+  onCancel,
+}: {
+  step: MatchupStep;
+  matchup: Matchup;
+  onSet: (aiSpecies: string, playerSpecies: string, v: Cell) => void;
+  onAllNeutral: () => void;
+  onBegin: () => void;
+  onCancel: () => void;
+}) {
+  // neutral → AI favored (+1) → AI weak (−1) → neutral
+  const cycle = (v: Cell): Cell => (v === 0 ? 1 : v === 1 ? -1 : 0);
+  const cellClass = (v: Cell) =>
+    "matchup-cell" + (v > 0 ? " matchup-cell--pos" : v < 0 ? " matchup-cell--neg" : "");
+  const cellText = (v: Cell) => (v > 0 ? "+" : v < 0 ? "−" : "0");
+  const cellTitle = (ai: string, you: string, v: Cell) =>
+    `${ai} vs ${you}: ${v > 0 ? "AI favored" : v < 0 ? "AI at a disadvantage" : "neutral"}`;
+
+  return (
+    <div className="matchup-setup">
+      <div className="matchup-head">
+        <h2 className="matchup-title">Set the Adaptive AI&apos;s matchups</h2>
+        <p className="matchup-sub">
+          Rate each of the AI&apos;s Pokémon (rows) against each of yours (columns) — from the AI&apos;s
+          point of view. Click a cell to cycle: <span className="matchup-key matchup-key--neutral">0</span>{" "}
+          neutral → <span className="matchup-key matchup-key--pos">+</span> AI favored →{" "}
+          <span className="matchup-key matchup-key--neg">−</span> AI at a disadvantage. The AI switches
+          in to, targets, and holds its ground on favorable matchups, and retreats from bad ones.
+        </p>
+      </div>
+
+      <div className="matchup-scroll">
+        <table className="matchup-table">
+          <thead>
+            <tr>
+              <th className="matchup-corner" scope="col">
+                AI ↓ / You →
+              </th>
+              {step.playerSpecies.map((you, j) => (
+                <th key={j} className="matchup-col-head" scope="col" title={you}>
+                  <Thumb name={you} />
+                  <span className="matchup-axis-name">{you}</span>
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {step.aiSpecies.map((ai, i) => (
+              <tr key={i}>
+                <th className="matchup-row-head" scope="row" title={ai}>
+                  <Thumb name={ai} />
+                  <span className="matchup-axis-name">{ai}</span>
+                </th>
+                {step.playerSpecies.map((you, j) => {
+                  const v = matchupValue(matchup, ai, you);
+                  return (
+                    <td key={j} className="matchup-cell-wrap">
+                      <button
+                        type="button"
+                        className={cellClass(v)}
+                        title={cellTitle(ai, you, v)}
+                        onClick={() => onSet(ai, you, cycle(v))}
+                      >
+                        {cellText(v)}
+                      </button>
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="matchup-actions">
+        <button className="battle-btn" onClick={onBegin}>
+          ▶ Begin Battle
+        </button>
+        <button className="battle-btn battle-btn--ghost" onClick={onAllNeutral}>
+          All neutral
+        </button>
+        <button className="battle-btn battle-btn--ghost" onClick={onCancel}>
+          Cancel
+        </button>
+      </div>
     </div>
   );
 }

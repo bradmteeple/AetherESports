@@ -8,6 +8,7 @@
 
 import "./node-shim"; // must precede any @pkmn import — defines Node globals for the browser
 import { RandomPlayerAI, Dex, toID } from "@pkmn/sim";
+import { matchupValue, type Matchup } from "./matchup";
 
 type Side = "p1" | "p2";
 
@@ -75,6 +76,7 @@ export class ReasoningAI extends RandomPlayerAI {
   protected slotCursor = 0;
   protected reasons: string[] = [];
   protected activeSp: Record<Side, (string | null)[]> = { p1: [null, null], p2: [null, null] };
+  protected actingSpecies = ""; // the mon whose move is currently being scored (for foeWeight)
   protected readonly mistakeRate: number;
   // Which side this AI plays. Defaults to p2 (the Battle tab's Rival AI); the Auto Battle
   // self-play runner sets it per side so "my" species and "foes" resolve correctly.
@@ -252,6 +254,7 @@ export class ReasoningAI extends RandomPlayerAI {
   ): { choice: string; rationale: string } {
     const doubles = this.reqActiveLen > 1;
     const mySpecies = this.activeSp[this.side][slot] || "";
+    this.actingSpecies = mySpecies; // scoreMove → foeWeight reads this to consult the matchup chart
     const myTypes = mySpecies ? Dex.species.get(mySpecies).types ?? [] : [];
     const ctx: MoveCtx = { mySpecies, myTypes, foes: this.foes(), doubles };
     const scored = moves.map(({ choice, move }) => this.scoreMove(choice, move, ctx));
@@ -263,7 +266,11 @@ export class ReasoningAI extends RandomPlayerAI {
 
   // Net type matchup of a Pokémon (by its types) vs the current foes: how hard it hits them minus
   // how hard they hit it, using best super-effective coverage on each side.
-  protected matchup(myTypes: string[], foes: { types: string[] }[]): number {
+  protected matchup(
+    _mySpecies: string,
+    myTypes: string[],
+    foes: { species: string; types: string[] }[]
+  ): number {
     let s = 0;
     for (const f of foes) {
       const off = myTypes.reduce((mx, t) => Math.max(mx, this.effectiveness(t, f.types)), 0);
@@ -297,7 +304,7 @@ export class ReasoningAI extends RandomPlayerAI {
   // A pivot is the best play only when the active mon (slot i) is threatened by a super-effective
   // hit, can't hit back hard this turn (walled), AND a benched mon hard-answers the threat —
   // resisting it and threatening it back. Otherwise it stays in and attacks.
-  private shouldSwitch(
+  protected shouldSwitch(
     i: number,
     moves: { choice: string; move: any }[],
     switches: number[],
@@ -435,7 +442,7 @@ export class ReasoningAI extends RandomPlayerAI {
       for (const s of switches) {
         const nm = cleanName(s.pokemon?.details || "");
         const tt = nm ? Dex.species.get(nm).types ?? [] : [];
-        const sc = this.matchup(tt, foes);
+        const sc = this.matchup(nm, tt, foes);
         if (sc > bestScore) ((bestScore = sc), (bestSlot = s.slot));
       }
       slot = bestSlot;
@@ -490,11 +497,24 @@ export class AdaptiveAI extends ReasoningAI {
   private gameMoves: Record<string, Record<string, number>> = {};
   private saved = false;
   private noted = false;
+  // Optional pre-battle matchup chart the player set (AI mon vs your mon, from the AI's view).
+  private readonly chart?: Matchup;
 
-  constructor(playerStream: any, report: (turn: number, reasons: string[]) => void, seed?: any) {
-    super(playerStream, report, { mistakeRate: 0, seed });
+  constructor(
+    playerStream: any,
+    report: (turn: number, reasons: string[]) => void,
+    opts: { matchup?: Matchup; seed?: any } = {}
+  ) {
+    super(playerStream, report, { mistakeRate: 0, seed: opts.seed });
+    this.chart = opts.matchup;
     this.book = loadBook();
     this.skill = Math.max(0.2, Math.min(1, this.book.games / 8));
+  }
+
+  // Net chart rating of an AI mon vs the current foes (0 when no chart / all-neutral).
+  private chartSum(aiSpecies: string, foes: { species: string }[]): number {
+    if (!this.chart) return 0;
+    return foes.reduce((a, f) => a + matchupValue(this.chart, aiSpecies, f.species), 0);
   }
 
   protected override track(line: string) {
@@ -544,8 +564,49 @@ export class AdaptiveAI extends ReasoningAI {
     return best ? Math.min(1, best.bp / 120) : 0;
   }
 
+  // Target priority: keep the learned threat weight, then bias toward foes the acting AI mon is
+  // rated favorable against (+1 → ×1.5, −1 → ×0.6), so it presses its good matchups.
   protected override foeWeight(foeSpecies: string): number {
-    return 1 + this.skill * this.threatOf(foeSpecies);
+    const base = 1 + this.skill * this.threatOf(foeSpecies);
+    const m = matchupValue(this.chart, this.actingSpecies, foeSpecies);
+    return base * (m > 0 ? 1.5 : m < 0 ? 0.6 : 1);
+  }
+
+  // Switch-in / voluntary-pivot target: blend the player's chart into the type-matchup score so a
+  // favorable-rated mon is preferred (weight 3 lets a clear +1/−1 override close type calls).
+  protected override matchup(
+    mySpecies: string,
+    myTypes: string[],
+    foes: { species: string; types: string[] }[]
+  ): number {
+    return super.matchup(mySpecies, myTypes, foes) + 3 * this.chartSum(mySpecies, foes);
+  }
+
+  // Proactive retreat: if the chart says the active mon is losing (net < 0) and a benched mon is
+  // rated strictly better (and at least even), pivot to it. Otherwise defer to the type-based logic.
+  protected override shouldSwitch(
+    i: number,
+    moves: { choice: string; move: any }[],
+    switches: number[],
+    pokemon: any[]
+  ): number | null {
+    if (this.chart && switches.length) {
+      const foes = this.foes();
+      if (foes.length) {
+        const myName = this.activeSp[this.side][i] || cleanName(pokemon[i]?.details || "");
+        const mySum = this.chartSum(myName, foes);
+        if (mySum < 0) {
+          let bestSlot = -1;
+          let bestSum = mySum;
+          for (const s of switches) {
+            const sum = this.chartSum(cleanName(pokemon[s - 1]?.details || ""), foes);
+            if (sum > bestSum) ((bestSum = sum), (bestSlot = s));
+          }
+          if (bestSlot > 0 && bestSum >= 0) return bestSlot;
+        }
+      }
+    }
+    return super.shouldSwitch(i, moves, switches, pokemon);
   }
 
   protected override beforeChoices(request: any) {

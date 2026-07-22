@@ -11,6 +11,7 @@ import { ReasoningAI, AdaptiveAI } from "./ai";
 import { describeLine, emptyBoard, type BoardState, type StatBlock } from "./protocol";
 import { FORMATS, type FormatDef, type FormatKey } from "./formats";
 import { installChampionsStats } from "./champions-stats";
+import { type Matchup } from "./matchup";
 
 Teams.setGeneratorFactory(TeamGenerators);
 installChampionsStats(); // Reg M-B (Champions): 1 EV = +1 stat; other formats unchanged.
@@ -117,6 +118,40 @@ export interface CustomTeam {
   doubles: boolean;
 }
 
+export interface SelectedTeams {
+  p1: string; // packed player team
+  p2: string; // packed Rival AI team
+  p1Sets: any[];
+  p2Sets: any[];
+}
+
+// Choose both sides' teams for a format (custom pastes → auto → preset pool → generator). Pure, so
+// the UI can call it before the battle to build a pre-battle matchup chart, then hand the exact
+// teams back to the controller via `opts.preTeams`.
+export function selectTeams(def: FormatDef, custom?: CustomTeam): SelectedTeams {
+  if (custom) {
+    const p1Sets = custom.playerTeam ? Teams.unpack(custom.playerTeam) ?? [] : Teams.generate("gen9randombattle");
+    const p2Sets = custom.aiTeam ? Teams.unpack(custom.aiTeam) ?? [] : Teams.generate("gen9randombattle");
+    const p1 = custom.playerTeam ?? Teams.pack(p1Sets);
+    const p2 = custom.aiTeam ?? Teams.pack(p2Sets);
+    return { p1, p2, p1Sets, p2Sets };
+  }
+  if (def.packedTeams?.length) {
+    const pool = def.packedTeams;
+    const i = Math.floor(Math.random() * pool.length);
+    const j = pool.length > 1 ? (i + 1 + Math.floor(Math.random() * (pool.length - 1))) % pool.length : i;
+    return { p1: pool[i], p2: pool[j], p1Sets: Teams.unpack(pool[i]) ?? [], p2Sets: Teams.unpack(pool[j]) ?? [] };
+  }
+  const p1Sets = Teams.generate(def.engineFormat);
+  const p2Sets = Teams.generate(def.engineFormat);
+  return { p1: Teams.pack(p1Sets), p2: Teams.pack(p2Sets), p1Sets, p2Sets };
+}
+
+export interface ControllerOpts {
+  preTeams?: SelectedTeams; // exact teams to run (so a pre-battle matchup chart matches the battle)
+  matchup?: Matchup; // Level-3 chart the AdaptiveAI plays to
+}
+
 export class BattleController {
   private streams: ReturnType<typeof BattleStreams.getPlayerStreams>;
   private destroyed = false;
@@ -132,17 +167,20 @@ export class BattleController {
 
   private level: number;
   private custom?: CustomTeam;
+  private opts?: ControllerOpts;
 
   constructor(
     format: FormatKey,
     level: number,
     onUpdate: (s: BattleSnapshot) => void,
-    custom?: CustomTeam
+    custom?: CustomTeam,
+    opts?: ControllerOpts
   ) {
     this.def = FORMATS[format];
     this.level = level;
     this.onUpdate = onUpdate;
     this.custom = custom;
+    this.opts = opts;
     this.snapshot = {
       format,
       gametype: custom ? (custom.doubles ? "doubles" : "singles") : this.def.gametype,
@@ -206,30 +244,9 @@ export class BattleController {
     return this.def.engineFormat;
   }
 
-  private teamsFor(): { p1: string; p2: string; p1Sets: any[]; p2Sets: any[] } {
-    if (this.custom) {
-      // Either side may bring a pasted team; a side without one gets an auto team.
-      const p1Sets = this.custom.playerTeam
-        ? Teams.unpack(this.custom.playerTeam) ?? []
-        : Teams.generate("gen9randombattle");
-      const p2Sets = this.custom.aiTeam
-        ? Teams.unpack(this.custom.aiTeam) ?? []
-        : Teams.generate("gen9randombattle");
-      const p1 = this.custom.playerTeam ?? Teams.pack(p1Sets);
-      const p2 = this.custom.aiTeam ?? Teams.pack(p2Sets);
-      return { p1, p2, p1Sets, p2Sets };
-    }
-    if (this.def.packedTeams?.length) {
-      const pool = this.def.packedTeams;
-      const i = Math.floor(Math.random() * pool.length);
-      const j = pool.length > 1 ? (i + 1 + Math.floor(Math.random() * (pool.length - 1))) % pool.length : i;
-      const p1Sets = Teams.unpack(pool[i]) ?? [];
-      const p2Sets = Teams.unpack(pool[j]) ?? [];
-      return { p1: pool[i], p2: pool[j], p1Sets, p2Sets };
-    }
-    const p1Sets = Teams.generate(this.def.engineFormat);
-    const p2Sets = Teams.generate(this.def.engineFormat);
-    return { p1: Teams.pack(p1Sets), p2: Teams.pack(p2Sets), p1Sets, p2Sets };
+  private teamsFor(): SelectedTeams {
+    // Reuse the exact teams the UI already selected for the matchup chart, if any.
+    return this.opts?.preTeams ?? selectTeams(this.def, this.custom);
   }
 
   private buildTeamMaps(p1Sets: any[], p2Sets: any[]) {
@@ -266,7 +283,7 @@ export class BattleController {
     // Level 1 = weakened heuristic, Level 2 = full heuristic, Level 3 = adaptive (learns).
     const ai =
       this.level >= 3
-        ? new AdaptiveAI(this.streams.p2, onReason)
+        ? new AdaptiveAI(this.streams.p2, onReason, { matchup: this.opts?.matchup })
         : new ReasoningAI(this.streams.p2, onReason, { mistakeRate: this.level <= 1 ? 0.5 : 0 });
     void ai.start();
     void this.readPlayerStream();
