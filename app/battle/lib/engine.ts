@@ -5,13 +5,16 @@
 // with team preview (VGC 2025 Reg I). Mechanics are identical to the games.
 
 import "./node-shim"; // must precede any @pkmn import — defines Node globals for the browser
-import { BattleStreams, Teams, Dex, toID } from "@pkmn/sim";
+import { BattleStreams, Teams, Dex, toID, State, RandomPlayerAI } from "@pkmn/sim";
 import { TeamGenerators } from "@pkmn/randoms";
-import { ReasoningAI, AdaptiveAI } from "./ai";
+import { ReasoningAI } from "./ai";
 import { describeLine, emptyBoard, type BoardState, type StatBlock } from "./protocol";
 import { FORMATS, type FormatDef, type FormatKey } from "./formats";
 import { installChampionsStats } from "./champions-stats";
+import { installSimSerializationFix } from "./sim-fix";
 import { type Matchup } from "./matchup";
+import { emptyModel, loadModel, saveModel, mergeModels, record, type OpponentModel } from "./opponent-model";
+import type { DecisionMsg } from "./mcts-battle-worker";
 
 Teams.setGeneratorFactory(TeamGenerators);
 installChampionsStats(); // Reg M-B (Champions): 1 EV = +1 stat; other formats unchanged.
@@ -81,6 +84,11 @@ export interface BattleSnapshot {
   previewPick: number; // how many to bring
   ended: boolean;
   winner: string | null;
+  // Level 3 (Monte Carlo) live plan: true while the AI is searching; its self-estimated win chance
+  // (0..1, the Rival AI's perspective); and the endgame it's steering toward (p2 species left standing).
+  searching: boolean;
+  winProb?: number;
+  endgame?: string[];
 }
 
 const itemName = (raw: string | undefined): string => {
@@ -149,10 +157,11 @@ export function selectTeams(def: FormatDef, custom?: CustomTeam): SelectedTeams 
 
 export interface ControllerOpts {
   preTeams?: SelectedTeams; // exact teams to run (so a pre-battle matchup chart matches the battle)
-  matchup?: Matchup; // Level-3 chart the AdaptiveAI plays to
+  matchup?: Matchup; // Level-3 chart folded into the Monte Carlo search (omitted when the toggle is off)
 }
 
 export class BattleController {
+  private rawStream: InstanceType<typeof BattleStreams.BattleStream>;
   private streams: ReturnType<typeof BattleStreams.getPlayerStreams>;
   private destroyed = false;
   private snapshot: BattleSnapshot;
@@ -168,6 +177,15 @@ export class BattleController {
   private level: number;
   private custom?: CustomTeam;
   private opts?: ControllerOpts;
+
+  // Level 3 (Monte Carlo) state: the off-thread searcher + its pending decisions, and the learned
+  // player model (persisted across games + this game's observations, weighted higher).
+  private battleWorker?: Worker;
+  private pending = new Map<number, (d: DecisionMsg) => void>();
+  private decideId = 0;
+  private persistedModel: OpponentModel = emptyModel();
+  private gameModel: OpponentModel = emptyModel();
+  private modelSaved = false;
 
   constructor(
     format: FormatKey,
@@ -198,8 +216,15 @@ export class BattleController {
       previewPick: this.def.teamSize,
       ended: false,
       winner: null,
+      searching: false,
     };
-    this.streams = BattleStreams.getPlayerStreams(new BattleStreams.BattleStream());
+    if (level >= 3) {
+      installSimSerializationFix(); // needed before serializing the live battle for the searcher
+      this.persistedModel = loadModel();
+    }
+    // Keep the raw stream so the omniscient, full-information Battle is reachable for the searcher.
+    this.rawStream = new BattleStreams.BattleStream();
+    this.streams = BattleStreams.getPlayerStreams(this.rawStream);
     this.start();
   }
 
@@ -280,10 +305,10 @@ export class BattleController {
       this.reasonsByTurn[turn] = Array.from(new Set(merged));
       this.emit();
     };
-    // Level 1 = weakened heuristic, Level 2 = full heuristic, Level 3 = adaptive (learns).
+    // Level 1 = weakened heuristic, Level 2 = full heuristic, Level 3 = Monte Carlo endgame search.
     const ai =
       this.level >= 3
-        ? new AdaptiveAI(this.streams.p2, onReason, { matchup: this.opts?.matchup })
+        ? new MctsPlayer(this.streams.p2, (req) => this.decideP2(req))
         : new ReasoningAI(this.streams.p2, onReason, { mistakeRate: this.level <= 1 ? 0.5 : 0 });
     void ai.start();
     void this.readPlayerStream();
@@ -319,11 +344,15 @@ export class BattleController {
             this.snapshot.winner = line.slice("|win|".length).trim();
             this.snapshot.ended = true;
             this.snapshot.prompt = "none";
+            this.snapshot.searching = false;
+            this.persistModel();
             const text = describeLine(line, this.snapshot.board);
             if (text) this.pushLog(text);
           } else if (line === "|tie" || line.startsWith("|tie|")) {
             this.snapshot.ended = true;
             this.snapshot.prompt = "none";
+            this.snapshot.searching = false;
+            this.persistModel();
             this.pushLog("The battle ended in a tie.");
           } else {
             const text = describeLine(line, this.snapshot.board);
@@ -471,15 +500,141 @@ export class BattleController {
   /** Send the human player's full turn decision to the engine. */
   choose(choice: string) {
     if (this.destroyed || this.snapshot.ended) return;
+    // Learn how the human plays (for the Level 3 searcher's exploitative opponent model). Record BEFORE
+    // writing the choice, while the battle still holds the pre-move matchup this decision was made in.
+    if (this.level >= 3) {
+      try {
+        record(this.gameModel, this.rawStream.battle, "p1", choice, 3); // weight this-game higher
+      } catch {
+        /* battle not ready / non-recordable choice */
+      }
+    }
     this.snapshot.prompt = "wait";
     this.emit();
     void this.streams.p1.write(choice);
   }
 
+  // ---- Level 3 Monte Carlo search (off the main thread) -----------------------------------------
+
+  private ensureBattleWorker(): Worker {
+    if (!this.battleWorker) {
+      this.battleWorker = new Worker(new URL("./mcts-battle-worker.ts", import.meta.url));
+      this.battleWorker.onmessage = (e: MessageEvent<DecisionMsg | { type: "error"; id: number }>) => {
+        const m = e.data as DecisionMsg | { type: "error"; id: number };
+        const cb = this.pending.get(m.id);
+        if (!cb) return;
+        this.pending.delete(m.id);
+        if (m.type === "decision") cb(m);
+        else cb({ type: "decision", id: m.id, choice: "default", winProb: 0.5, endgame: [], sims: 0 });
+      };
+    }
+    return this.battleWorker;
+  }
+
+  private runSearch(payload: {
+    battleJSON: string;
+    budget: number;
+    deadlineMs: number;
+    chart?: Matchup;
+    opponent?: OpponentModel;
+  }): Promise<DecisionMsg> {
+    const w = this.ensureBattleWorker();
+    const id = ++this.decideId;
+    return new Promise((resolve) => {
+      this.pending.set(id, resolve);
+      w.postMessage({ type: "decide", id, ...payload });
+    });
+  }
+
+  // Decide the Rival AI's (p2) move by Monte Carlo search: snapshot the live full-information battle,
+  // search off-thread (time-boxed), then report the endgame it's steering toward. Kicked off the moment
+  // the AI's request arrives, so it thinks while the human is still choosing.
+  private async decideP2(_request: any): Promise<string> {
+    let battleJSON = "";
+    try {
+      const live = this.rawStream.battle;
+      if (!live) return "default";
+      battleJSON = JSON.stringify(State.serializeBattle(live));
+    } catch {
+      return "default"; // couldn't snapshot the position → let the engine pick a legal default
+    }
+    this.snapshot.searching = true;
+    this.emit();
+
+    const opponent = mergeModels(this.persistedModel, this.gameModel);
+    const decision = await this.runSearch({
+      battleJSON,
+      budget: 6000, // high ceiling; the 15s deadline is what usually stops the search
+      deadlineMs: 15000,
+      chart: this.opts?.matchup, // undefined when the pre-battle chart toggle is off → pure MCTS
+      opponent,
+    });
+    if (this.destroyed) return decision.choice;
+
+    this.snapshot.searching = false;
+    this.snapshot.winProb = decision.winProb;
+    this.snapshot.endgame = decision.endgame;
+    const reason = endgameReason(decision);
+    if (reason) {
+      const t = this.maxTurn;
+      this.reasonsByTurn[t] = Array.from(new Set([...(this.reasonsByTurn[t] ?? []), reason]));
+    }
+    this.emit();
+    return decision.choice;
+  }
+
+  // Merge this game's observations into the persisted player model and save (once per battle).
+  private persistModel() {
+    if (this.level < 3 || this.modelSaved) return;
+    this.modelSaved = true;
+    const merged = mergeModels(this.persistedModel, this.gameModel);
+    merged.games = this.persistedModel.games + 1;
+    saveModel(merged);
+  }
+
   destroy() {
     this.destroyed = true;
+    this.battleWorker?.terminate();
+    this.pending.clear();
     try {
       void this.streams.omniscient.writeEnd();
+    } catch {
+      /* noop */
+    }
+  }
+}
+
+// Reasoning line for the "Why?" panel: the endgame the search is steering toward + its win estimate.
+function endgameReason(d: DecisionMsg): string | null {
+  const pct = Math.round((d.winProb ?? 0.5) * 100);
+  if (d.endgame && d.endgame.length) {
+    return `Monte Carlo plan: steering toward an endgame with ${d.endgame.join(" + ")} (~${pct}% win).`;
+  }
+  return `Monte Carlo search: about ${pct}% to win from here.`;
+}
+
+// p2 (Rival AI) player driven by the Monte Carlo searcher. On each actionable request it hands off to
+// the controller's async decide() (which runs the off-thread search) and submits the returned choice.
+class MctsPlayer extends RandomPlayerAI {
+  private readonly decide: (request: any) => Promise<string>;
+  constructor(stream: any, decide: (request: any) => Promise<string>) {
+    super(stream);
+    this.decide = decide;
+  }
+  override receiveRequest(request: any) {
+    if (!request || request.wait) return; // nothing to choose this turn
+    void this.decide(request).then((choice) => {
+      try {
+        this.choose(choice);
+      } catch {
+        /* the engine re-opens the request on a rejected choice */
+      }
+    });
+  }
+  override receiveError(_error: Error) {
+    // A rejected choice would otherwise wedge the battle — fall back to a legal default.
+    try {
+      this.choose("default");
     } catch {
       /* noop */
     }

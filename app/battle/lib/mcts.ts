@@ -15,6 +15,8 @@
 import "./node-shim"; // must precede any @pkmn import
 import { Battle, State, PRNG, Dex, toID } from "@pkmn/sim";
 import { installSimSerializationFix } from "./sim-fix";
+import { matchupValue, type Matchup } from "./matchup";
+import { priorWeight, tokenPrior, type OpponentModel } from "./opponent-model";
 
 installSimSerializationFix(); // keep State refs valid under production minification (before any fork)
 
@@ -255,8 +257,25 @@ function terminalValue(battle: any): number {
   return 0.5;
 }
 
-// Neutral leaf evaluation if a rollout hits the depth cap: share of total remaining HP.
-function evalState(battle: any): number {
+const clamp01 = (x: number) => (x < 0 ? 0 : x > 1 ? 1 : x);
+const monAlive = (p: any) => p && p.hp > 0 && !p.fainted;
+const speciesName = (p: any): string => (p?.species && p.species.name) || p?.set?.species || p?.name || "";
+
+// Net pre-battle-chart advantage for p2 over the surviving mons, in ~[-1,1] (positive = AI favored).
+// Averages the player's matchup ratings across every alive p2 mon vs every alive p1 mon, so a position
+// that keeps p2's favored mons (and removes their answers) scores higher for p2.
+function chartBias(battle: any, chart: Matchup): number {
+  const p2 = (battle.p2?.pokemon ?? []).filter(monAlive).map(speciesName);
+  const p1 = (battle.p1?.pokemon ?? []).filter(monAlive).map(speciesName);
+  if (!p2.length || !p1.length) return 0;
+  let s = 0;
+  for (const a of p2) for (const d of p1) s += matchupValue(chart, a, d);
+  return s / (p2.length * p1.length);
+}
+
+// Neutral leaf evaluation if a rollout hits the depth cap: share of total remaining HP (p1's view).
+// An optional pre-battle chart gently tilts the value toward p2 when it holds favorable matchups.
+function evalState(battle: any, chart?: Matchup): number {
   const frac = (side: any) => {
     let cur = 0,
       max = 0;
@@ -268,7 +287,10 @@ function evalState(battle: any): number {
   };
   const a = frac(battle.p1);
   const b = frac(battle.p2);
-  return a + b > 0 ? a / (a + b) : 0.5;
+  let v = a + b > 0 ? a / (a + b) : 0.5;
+  // Lower v is better for p2, so subtract p2's chart advantage. Bounded so real simulation dominates.
+  if (chart) v = clamp01(v - 0.12 * chartBias(battle, chart));
+  return v;
 }
 
 // ---- Light rollout policy (playouts only) -------------------------------------------------------
@@ -358,7 +380,7 @@ function lightChoice(battle: any, side: SideID, rng: Rng): string {
   return "default";
 }
 
-function playout(battle: any, rng: Rng, cap: number): number {
+function playout(battle: any, rng: Rng, cap: number, chart?: Matchup): number {
   let turns = 0;
   while (!battle.ended && turns < cap) {
     const ok = applyChoices(battle, {
@@ -368,7 +390,7 @@ function playout(battle: any, rng: Rng, cap: number): number {
     if (!ok) break; // sim end-state quirk → score the position we reached
     if (battle.requestState === "move") turns++;
   }
-  return battle.ended ? terminalValue(battle) : evalState(battle);
+  return battle.ended ? terminalValue(battle) : evalState(battle, chart);
 }
 
 // ---- Regret-matching learner (per factor) -------------------------------------------------------
@@ -431,15 +453,30 @@ export interface SideResult {
   choice: string; // the sampled full choice string for this side
   strategy: number[][]; // per factor: the mixed strategy (probabilities aligned with `acts`)
   acts: string[][]; // per factor: the action labels
+  value: number; // this side's estimated value of the node (~win probability, 0..1)
 }
 export type SearchResult = { p1?: SideResult; p2?: SideResult };
+
+// Options that only shape the interactive Level 3 search — omitting them all reproduces the original
+// fixed-budget, equilibrium behavior byte-for-byte (so Auto Battle is untouched).
+export interface SearchOpts {
+  deadlineMs?: number; // wall-clock cap for the whole search (in addition to the iteration budget)
+  chart?: Matchup; // pre-battle matchup chart (p2's view) folded into leaf evaluation
+  opponent?: OpponentModel; // learned p1 behavioral model → bias p1's strategy (exploitative play)
+}
+
+// Blend two distributions: (1-l)·a + l·b.
+function mix(a: number[], b: number[], l: number): number[] {
+  return a.map((x, i) => (1 - l) * x + l * (b[i] ?? 0));
+}
 
 /**
  * Solve the current decision by Monte Carlo search: sample joint actions via regret matching, play
  * each fork out to the end (chance re-seeded every iteration), and update regrets from the outcome.
  * Returns, per acting side, a mixed strategy and a choice sampled from its equilibrium average.
  */
-export function search(root: any, rng: Rng, budget: number): SearchResult {
+export function search(root: any, rng: Rng, budget: number, opts: SearchOpts = {}): SearchResult {
+  const { deadlineMs, chart, opponent } = opts;
   const decisions: Partial<Record<SideID, SideDecision>> = {};
   const learners: Partial<Record<SideID, Learner[]>> = {};
   for (const sid of [P1, P2] as SideID[]) {
@@ -459,9 +496,26 @@ export function search(root: any, rng: Rng, budget: number): SearchResult {
   const acting = (Object.keys(decisions) as SideID[]).filter((s) => decisions[s]);
   if (!acting.length) return {};
 
+  // Exploit the learned player model: a per-factor prior over p1's tokens, mixed into p1's sampled
+  // strategy so p2 best-responds to how the player actually plays (its reads), not equilibrium.
+  let p1Prior: number[][] | null = null;
+  let p1Lambda = 0;
+  if (opponent && decisions[P1]) {
+    const d = decisions[P1]!;
+    // Recover each factor's active slot (move/switch: factor order follows acting slots; teampreview: 0).
+    const slotOf = d.factors.map((_f, fi) => {
+      const s = d.slotMap.findIndex((m) => m === fi);
+      return s < 0 ? 0 : s;
+    });
+    p1Prior = d.factors.map((f, fi) => tokenPrior(opponent, root, P1, slotOf[fi], f.tokens));
+    p1Lambda = priorWeight(opponent);
+  }
+
   const snapshot = JSON.stringify(State.serializeBattle(root)); // string → forks fully isolated
+  const stopAt = deadlineMs != null ? Date.now() + deadlineMs : Infinity;
 
   for (let it = 0; it < budget; it++) {
+    if (it > 0 && (it & 15) === 0 && Date.now() >= stopAt) break; // wall-clock cap (interactive path)
     const fork = forkFrom(snapshot);
     const picks: Partial<Record<SideID, number[]>> = {};
     const sigmas: Partial<Record<SideID, number[][]>> = {};
@@ -469,7 +523,8 @@ export function search(root: any, rng: Rng, budget: number): SearchResult {
 
     for (const sid of acting) {
       const Ls = learners[sid]!;
-      const sig = Ls.map((L) => rmStrategy(L));
+      let sig = Ls.map((L) => rmStrategy(L));
+      if (sid === P1 && p1Prior && p1Lambda > 0) sig = sig.map((s, fi) => mix(s, p1Prior![fi], p1Lambda));
       const pk = Ls.map((L, fi) => sample(L.acts, sig[fi], rng));
       sigmas[sid] = sig;
       picks[sid] = pk;
@@ -480,7 +535,7 @@ export function search(root: any, rng: Rng, budget: number): SearchResult {
     }
 
     const applied = applyChoices(fork, choice);
-    const v = applied ? playout(fork, rng, DEFAULTS.rolloutTurnCap) : evalState(fork);
+    const v = applied ? playout(fork, rng, DEFAULTS.rolloutTurnCap, chart) : evalState(fork, chart);
 
     for (const sid of acting) {
       const val = sid === P1 ? v : 1 - v;
@@ -512,6 +567,7 @@ export function search(root: any, rng: Rng, budget: number): SearchResult {
     const Ls = learners[sid]!;
     const strat = Ls.map((L) => avgStrategy(L));
     const pk = Ls.map((L, fi) => sample(L.acts, strat[fi], rng));
+    const value = Ls.length ? Ls.reduce((s, L) => s + L.V, 0) / Ls.length : 0.5;
     out[sid] = {
       choice: assemble(
         decisions[sid]!,
@@ -519,9 +575,38 @@ export function search(root: any, rng: Rng, budget: number): SearchResult {
       ),
       strategy: strat,
       acts: Ls.map((L) => L.acts),
+      value,
     };
   }
   return out;
+}
+
+// Endgame projection for the reasoning panel: given p2's chosen move, sample how the game tends to
+// end and report the most common set of p2 Pokémon still standing when p2 wins — the "endgame it's
+// steering toward." Cheap (light playouts); the win-probability estimate comes from search() itself.
+export function projectEndgame(snapshotJSON: string, p2Choice: string, rng: Rng, samples: number): string[] {
+  const tally = new Map<string, { n: number; species: string[] }>();
+  for (let i = 0; i < samples; i++) {
+    const b = forkFrom(snapshotJSON);
+    // First step: p2 commits its actual chosen move; p1 plays the light policy.
+    applyChoices(b, {
+      p1: sideActs(b.p1) ? lightChoice(b, P1, rng) : undefined,
+      p2: sideActs(b.p2) ? p2Choice : undefined,
+    });
+    playout(b, rng, DEFAULTS.rolloutTurnCap);
+    if (b.ended && b.winner && b.winner === b.p2?.name) {
+      const alive = (b.p2.pokemon ?? []).filter(monAlive).map(speciesName).filter(Boolean).sort();
+      if (alive.length) {
+        const key = alive.join("+");
+        const e = tally.get(key) ?? { n: 0, species: alive };
+        e.n++;
+        tally.set(key, e);
+      }
+    }
+  }
+  let best: { n: number; species: string[] } | null = null;
+  for (const e of Array.from(tally.values())) if (!best || e.n > best.n) best = e;
+  return best ? best.species : [];
 }
 
 // ---- Battle construction helper (bare Battle, no streams) ---------------------------------------

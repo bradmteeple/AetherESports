@@ -35,6 +35,8 @@ export default function BattlePage() {
   // Level-3 pre-battle matchup chart step (null unless the player is filling it in).
   const [matchupStep, setMatchupStep] = useState<MatchupStep | null>(null);
   const [matchup, setMatchupState] = useState<Matchup>(emptyMatchup());
+  // Level 3 only: whether to hand the Monte Carlo AI a pre-battle matchup chart (off = pure MCTS).
+  const [useChart, setUseChart] = useState(false);
   const logEndRef = useRef<HTMLDivElement | null>(null);
   const chooseRef = useRef<((choice: string) => void) | null>(null);
 
@@ -87,8 +89,9 @@ export default function BattlePage() {
     setRunningLevel(selectedLevel);
     setRunningCustom(custom);
 
-    // Level 3: pick the teams now and let the player set a matchup chart before the battle begins.
-    if (selectedLevel === 3) {
+    // Level 3 + chart toggle on: pick the teams now and let the player set a matchup chart before the
+    // battle begins (the chart biases the Monte Carlo search). Otherwise Level 3 goes straight to pure MCTS.
+    if (selectedLevel === 3 && useChart) {
       const { selectTeams } = await import("./lib/engine");
       const preTeams = selectTeams(FORMATS[selectedFormat], custom);
       setStarted(false); // tear down any battle in progress while the chart is filled in
@@ -105,7 +108,7 @@ export default function BattlePage() {
     setRunningOpts(undefined);
     setStarted(true);
     setBattleKey((k) => k + 1);
-  }, [selectedFormat, selectedLevel, customTeam, playerTeam, selectedDoubles]);
+  }, [selectedFormat, selectedLevel, customTeam, playerTeam, selectedDoubles, useChart]);
 
   const beginBattle = useCallback(() => {
     if (!matchupStep) return;
@@ -167,7 +170,7 @@ export default function BattlePage() {
           {
             n: 3,
             label: "3 · Adaptive",
-            tip: "Designed to improve with every game you play against it — it learns your tendencies and sharpens each game.",
+            tip: "Thinks with a Monte Carlo search: it plays the game out to its endgames, steers toward the best winning line, and learns your tendencies (including your reads) to play against you. Takes up to ~15s per move.",
           },
         ].map((lvl) => (
           <button
@@ -188,6 +191,13 @@ export default function BattlePage() {
           </button>
         ))}
       </div>
+
+      {selectedLevel === 3 && (
+        <label className="chart-toggle">
+          <input type="checkbox" checked={useChart} onChange={(e) => setUseChart(e.target.checked)} />
+          Set a matchup chart before the battle (biases the AI&apos;s search — off = pure Monte Carlo)
+        </label>
+      )}
 
       {FORMATS[selectedFormat].note && (
         <p className="format-note">* {FORMATS[selectedFormat].note}</p>
@@ -211,6 +221,7 @@ export default function BattlePage() {
           <AiWhyPanel open={whyOpen} onToggle={() => setWhyOpen((o) => !o)} reasons={snapshot.aiReasons} />
 
           <div className="battle-main">
+            <MctsPlanBar snapshot={snapshot} />
             <div className="battle-grid">
               <RosterTray label="Rival AI" mons={snapshot.rosters.p2} />
               <FieldSide board={snapshot.board} side="p2" label="Rival AI" doubles={snapshot.gametype === "doubles"} foe />
@@ -242,10 +253,36 @@ export default function BattlePage() {
   );
 }
 
+// Level 3 live plan: while the Monte Carlo AI searches, show a "thinking" state; once it decides, show
+// its self-estimated win chance and the endgame it's steering toward. Hidden entirely for Levels 1–2.
+function MctsPlanBar({ snapshot }: { snapshot: BattleSnapshot }) {
+  const has = snapshot.winProb !== undefined;
+  if (!snapshot.searching && !has) return null;
+  const pct = has ? Math.round((snapshot.winProb ?? 0) * 100) : null;
+  return (
+    <div className="mcts-plan" aria-live="polite">
+      {snapshot.searching ? (
+        <span className="mcts-thinking">
+          <span className="mcts-spinner" aria-hidden="true" />
+          Rival AI is thinking… <span className="mcts-dim">(Monte Carlo search, up to ~15s)</span>
+        </span>
+      ) : (
+        <span className="mcts-eval">
+          <span className="mcts-winprob">Rival AI win chance ~{pct}%</span>
+          {snapshot.endgame && snapshot.endgame.length > 0 && (
+            <span className="mcts-endgame">
+              · steering toward an endgame with <strong>{snapshot.endgame.join(" + ")}</strong>
+            </span>
+          )}
+        </span>
+      )}
+    </div>
+  );
+}
+
 // Pre-battle matchup chart for the Adaptive (Level 3) AI. Rows = the AI's Pokémon, columns = your
 // Pokémon; each cell rates the matchup FROM THE AI'S PERSPECTIVE, cycling neutral → AI favored (+) →
-// AI weak (−). The AI plays to it (see AdaptiveAI in ai.ts). Default all-neutral makes Level 3 behave
-// exactly as before.
+// AI weak (−). When enabled it biases the Monte Carlo search. All-neutral leaves the search unbiased.
 function MatchupSetup({
   step,
   matchup,
