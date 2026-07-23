@@ -10,7 +10,7 @@
 import "./node-shim"; // must precede any @pkmn import
 import { State } from "@pkmn/sim";
 import { installChampionsStats } from "./champions-stats";
-import { search, projectEndgame } from "./mcts";
+import { search, projectEndgame, DEFAULTS } from "./mcts";
 import type { Matchup } from "./matchup";
 import type { OpponentModel } from "./opponent-model";
 
@@ -51,6 +51,7 @@ ctx.onmessage = (e: MessageEvent<BattleWorkerIn>) => {
       deadlineMs,
       chart: msg.chart,
       opponent: msg.opponent,
+      aggression: DEFAULTS.aggression, // Level 3 plays aggressively (seek KOs, close games fast)
     });
     const p2 = res.p2;
     const choice = p2?.choice ?? "default";

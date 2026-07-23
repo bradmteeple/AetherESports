@@ -26,7 +26,13 @@ export const DEFAULTS = {
   teamBudget: 450, // iterations for the (larger) Team Preview decision
   rolloutTurnCap: 40, // playout depth cap before falling back to a neutral HP eval
   megaRolloutProb: 0.5, // chance the light rollout policy Mega Evolves when able (varied timing)
+  aggression: 0.6, // interactive Level 3 aggression (0 = neutral HP-share; higher = seek KOs, close fast)
 };
+
+// Aggression tuning (all scale with the `aggression` value; 0 reproduces the old eval exactly):
+const ALIVE_BONUS_K = 1.5; // a surviving mon is worth aliveBonus (=K*aggression) beyond its HP → a KO is a big swing
+const OFFENSE_K = 1.0; // damage DEALT weighted (1 + OFFENSE_K*aggression)× vs preserving own HP (kept mild so it doesn't trade badly)
+const TEMPO_W = 0.12; // terminal band: wins in [1-TEMPO_W, 1], losses in [0, TEMPO_W] (faster win = higher)
 
 const P1 = "p1";
 const P2 = "p2";
@@ -273,23 +279,56 @@ function chartBias(battle: any, chart: Matchup): number {
   return s / (p2.length * p1.length);
 }
 
-// Neutral leaf evaluation if a rollout hits the depth cap: share of total remaining HP (p1's view).
+// Total remaining HP fraction of a side (0..1 over the whole team).
+function hpShare(side: any): number {
+  let cur = 0,
+    max = 0;
+  for (const p of side.pokemon) {
+    cur += Math.max(0, p.hp);
+    max += p.maxhp || 1;
+  }
+  return max ? cur / max : 0;
+}
+
+// Aggression-weighted team strength: each SURVIVING mon is worth `aliveBonus + its HP fraction`. The
+// alive bonus makes removing a mon (a KO) a large swing, so the search values finishing mons and
+// eliminating the opponent over preserving its own low-HP mons — i.e. it attacks and secures KOs.
+function teamStrength(side: any, aliveBonus: number): number {
+  let s = 0;
+  for (const p of side.pokemon) {
+    if (p && p.hp > 0 && !p.fainted) s += aliveBonus + Math.max(0, p.hp) / (p.maxhp || 1);
+  }
+  return s;
+}
+
+// Leaf evaluation when a rollout hits the depth cap (p1's view, higher = better for p1).
+// - aggression === 0: the original symmetric HP share (Auto Battle unchanged, byte-for-byte).
+// - aggression  >  0: KO-seeking alive-bonus strength ratio, clamped to [TEMPO_W, 1-TEMPO_W] so a real
+//   win/loss (see playout) always outranks any non-terminal position.
 // An optional pre-battle chart gently tilts the value toward p2 when it holds favorable matchups.
-function evalState(battle: any, chart?: Matchup): number {
-  const frac = (side: any) => {
-    let cur = 0,
-      max = 0;
-    for (const p of side.pokemon) {
-      cur += Math.max(0, p.hp);
-      max += p.maxhp || 1;
-    }
-    return max ? cur / max : 0;
-  };
-  const a = frac(battle.p1);
-  const b = frac(battle.p2);
-  let v = a + b > 0 ? a / (a + b) : 0.5;
+export function evalState(battle: any, chart?: Matchup, aggression = 0): number {
+  let v: number;
+  if (aggression > 0) {
+    const B = ALIVE_BONUS_K * aggression;
+    const s1 = teamStrength(battle.p1, B);
+    const s2 = teamStrength(battle.p2, B);
+    // Full-team strength each side could have (brought size × per-mon max) — the baseline "damage dealt"
+    // is measured against. Weight damage DEALT to the foe above preserving one's own HP, so the AI
+    // presses attacks and secures KOs instead of Protecting/switching to preserve itself.
+    const full = (side: any) => side.pokemon.length * (B + 1);
+    const wO = 1 + OFFENSE_K * aggression;
+    const scoreP1 = wO * Math.max(0, full(battle.p2) - s2) + s1; // p1's offense (dmg to p2) + p1's defense
+    const scoreP2 = wO * Math.max(0, full(battle.p1) - s1) + s2;
+    v = scoreP1 + scoreP2 > 0 ? scoreP1 / (scoreP1 + scoreP2) : 0.5;
+  } else {
+    const a = hpShare(battle.p1);
+    const b = hpShare(battle.p2);
+    v = a + b > 0 ? a / (a + b) : 0.5;
+  }
   // Lower v is better for p2, so subtract p2's chart advantage. Bounded so real simulation dominates.
   if (chart) v = clamp01(v - 0.12 * chartBias(battle, chart));
+  // Keep non-terminal evals strictly inside the terminal win/loss bands (so wins/losses always win).
+  if (aggression > 0) v = Math.max(TEMPO_W, Math.min(1 - TEMPO_W, v));
   return v;
 }
 
@@ -380,7 +419,7 @@ function lightChoice(battle: any, side: SideID, rng: Rng): string {
   return "default";
 }
 
-function playout(battle: any, rng: Rng, cap: number, chart?: Matchup): number {
+function playout(battle: any, rng: Rng, cap: number, chart?: Matchup, aggression = 0): number {
   let turns = 0;
   while (!battle.ended && turns < cap) {
     const ok = applyChoices(battle, {
@@ -390,7 +429,13 @@ function playout(battle: any, rng: Rng, cap: number, chart?: Matchup): number {
     if (!ok) break; // sim end-state quirk → score the position we reached
     if (battle.requestState === "move") turns++;
   }
-  return battle.ended ? terminalValue(battle) : evalState(battle, chart);
+  if (!battle.ended) return evalState(battle, chart, aggression);
+  const tv = terminalValue(battle);
+  // Tempo: prefer FASTER wins (and slower losses). Wins land in [1-TEMPO_W, 1], losses in [0, TEMPO_W],
+  // so a real result always outranks any non-terminal eval — the AI still plays purely to win.
+  if (aggression <= 0 || tv === 0.5) return tv;
+  const speed = 1 - Math.min(1, turns / cap); // 1 = instant, 0 = hit the depth cap
+  return tv === 1 ? 1 - TEMPO_W + TEMPO_W * speed : TEMPO_W * (1 - speed);
 }
 
 // ---- Regret-matching learner (per factor) -------------------------------------------------------
@@ -463,6 +508,7 @@ export interface SearchOpts {
   deadlineMs?: number; // wall-clock cap for the whole search (in addition to the iteration budget)
   chart?: Matchup; // pre-battle matchup chart (p2's view) folded into leaf evaluation
   opponent?: OpponentModel; // learned p1 behavioral model → bias p1's strategy (exploitative play)
+  aggression?: number; // 0 = neutral HP-share eval; higher = seek KOs and close games faster
 }
 
 // Blend two distributions: (1-l)·a + l·b.
@@ -476,7 +522,7 @@ function mix(a: number[], b: number[], l: number): number[] {
  * Returns, per acting side, a mixed strategy and a choice sampled from its equilibrium average.
  */
 export function search(root: any, rng: Rng, budget: number, opts: SearchOpts = {}): SearchResult {
-  const { deadlineMs, chart, opponent } = opts;
+  const { deadlineMs, chart, opponent, aggression = 0 } = opts;
   const decisions: Partial<Record<SideID, SideDecision>> = {};
   const learners: Partial<Record<SideID, Learner[]>> = {};
   for (const sid of [P1, P2] as SideID[]) {
@@ -535,7 +581,9 @@ export function search(root: any, rng: Rng, budget: number, opts: SearchOpts = {
     }
 
     const applied = applyChoices(fork, choice);
-    const v = applied ? playout(fork, rng, DEFAULTS.rolloutTurnCap, chart) : evalState(fork, chart);
+    const v = applied
+      ? playout(fork, rng, DEFAULTS.rolloutTurnCap, chart, aggression)
+      : evalState(fork, chart, aggression);
 
     for (const sid of acting) {
       const val = sid === P1 ? v : 1 - v;
