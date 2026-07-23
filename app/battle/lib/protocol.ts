@@ -33,12 +33,16 @@ export function emptyBoard(): BoardState {
   return { p1: [null, null], p2: [null, null] };
 }
 
-// "p1a: Great Tusk" -> { side: "p1", slot: 0, name: "Great Tusk" }
-function parseIdent(raw: string): { side: "p1" | "p2"; slot: number; name: string } {
+// "p1a: Great Tusk" -> { side: "p1", slot: 0, name: "Great Tusk", active: true }
+// A slot-less ident like "p1: Gardevoir" (an inactive/fainted mon's fullname) has active === false;
+// it carries no field position, so callers must not treat it as slot "a".
+function parseIdent(raw: string): { side: "p1" | "p2"; slot: number; name: string; active: boolean } {
   const [pos, ...rest] = raw.split(": ");
   const side = pos.slice(0, 2) as "p1" | "p2";
-  const slot = pos.charAt(2) === "b" ? 1 : 0;
-  return { side, slot, name: rest.join(": ") || pos };
+  const posChar = pos.charAt(2);
+  const active = posChar === "a" || posChar === "b" || posChar === "c";
+  const slot = posChar === "b" ? 1 : posChar === "c" ? 2 : 0;
+  return { side, slot, name: rest.join(": ") || pos, active };
 }
 
 // "184/240", "52/100 par", "0 fnt" -> percent + status
@@ -127,7 +131,11 @@ export function describeLine(line: string, board: BoardState): string | null {
     case "detailschange":
     case "-formechange": {
       // Mega Evolution / forme change: rename the on-field mon so its card + sprite update.
-      const { side, slot } = parseIdent(parts[1]);
+      // A slot-less ident ("p1: Gardevoir") is the SILENT base-forme revert the engine emits when a
+      // Mega faints (isActive already cleared → no slot letter). It has no field position, so ignore it
+      // — otherwise it would land on slot "a" and clobber the ally still on the field in doubles.
+      const { side, slot, active } = parseIdent(parts[1]);
+      if (!active) return null;
       const newName = (parts[2] || "").split(",")[0].trim();
       if (board[side][slot] && newName) board[side][slot] = { ...board[side][slot]!, name: newName };
       return null;
