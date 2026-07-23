@@ -776,7 +776,12 @@ function TurnPanel({ snapshot, choose }: { snapshot: BattleSnapshot; choose: (c:
   const initDecisions = useMemo<(string | null)[]>(() => {
     return Array.from({ length: nSlots }, (_, i) => {
       if (isSwitch) return snapshot.forceSwitch[i] ? null : "pass";
-      return snapshot.active[i]?.fainted ? "pass" : null;
+      const a = snapshot.active[i];
+      if (a?.fainted) return "pass";
+      // A recharging mon (post Hyper Beam etc.) can't act — auto-resolve its forced Recharge so the
+      // player is never prompted for it (Recharge is the only move, slot 1, no target/gimmick).
+      if (a?.mustRecharge) return "move 1";
+      return null;
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -833,9 +838,21 @@ function TurnPanel({ snapshot, choose }: { snapshot: BattleSnapshot; choose: (c:
     setDecisions(initDecisions);
   };
 
+  // Slots auto-resolved because the mon must recharge (Hyper Beam etc.) — shown so the player knows why.
+  const rechargeNames = snapshot.active
+    .map((a, i) => (a?.mustRecharge ? snapshot.board.p1[i]?.name ?? "Your Pokémon" : null))
+    .filter((n): n is string => !!n);
+  const rechargeNote =
+    rechargeNames.length > 0 ? (
+      <p className="choice-hint recharge-note">
+        🔋 {rechargeNames.join(" & ")} must recharge — it can&apos;t act this turn.
+      </p>
+    ) : null;
+
   if (currentSlot === -1) {
     return (
       <div className="choice-panel">
+        {rechargeNote}
         <p className="choice-hint">Locking in your move…</p>
       </div>
     );
@@ -850,6 +867,7 @@ function TurnPanel({ snapshot, choose }: { snapshot: BattleSnapshot; choose: (c:
 
   return (
     <div className="choice-panel">
+      {rechargeNote}
       <div className="slot-header">
         {nSlots > 1 && (
           <span className="slot-tag">

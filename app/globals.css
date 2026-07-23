@@ -574,6 +574,12 @@ body {
   margin-top: 1rem;
 }
 
+/* "Must recharge" notice — a recharging mon (post Hyper Beam) is auto-resolved, no player action. */
+.recharge-note {
+  color: #ffd98a;
+  font-weight: 600;
+}
+
 .move-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));

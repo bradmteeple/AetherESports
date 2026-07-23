@@ -248,6 +248,8 @@ export function describeLine(line: string, board: BoardState): string | null {
     case "cant": {
       const { side } = parseIdent(parts[1]);
       const name = nameOf(parts[1]);
+      // parts[2] is the reason it couldn't move (recharge, par, slp, flinch, …).
+      if (parts[2] === "recharge") return `${who(side)} ${name} must recharge!`;
       return `${who(side)} ${name} couldn't move!`;
     }
     case "turn":

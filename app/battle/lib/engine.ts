@@ -33,6 +33,7 @@ export interface ActiveSlot {
   trapped: boolean;
   canTera: boolean;
   canMega: boolean;
+  mustRecharge: boolean; // forced to recharge (e.g. after Hyper Beam) — the mon can't act this turn
   moves: MoveOption[];
 }
 
@@ -486,11 +487,16 @@ export class BattleController {
         target: m.target ?? "normal",
         disabled: !!m.disabled,
       }));
+      // A forced-recharge slot (after Hyper Beam etc.): a single locked "Recharge" move. The mon can't
+      // act, so the UI auto-resolves it (the player makes no choice) instead of showing a lone button.
+      const mustRecharge =
+        (a?.moves?.length ?? 0) === 1 && toID(a.moves[0].id ?? a.moves[0].move) === "recharge";
       return {
         fainted,
         trapped: !!a?.trapped,
         canTera: !!a?.canTerastallize,
         canMega: !!a?.canMegaEvo,
+        mustRecharge,
         moves,
       };
     });
