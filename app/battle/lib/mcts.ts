@@ -34,6 +34,12 @@ const ALIVE_BONUS_K = 1.5; // a surviving mon is worth aliveBonus (=K*aggression
 const OFFENSE_K = 1.0; // damage DEALT weighted (1 + OFFENSE_K*aggression)× vs preserving own HP (kept mild so it doesn't trade badly)
 const TEMPO_W = 0.12; // terminal band: wins in [1-TEMPO_W, 1], losses in [0, TEMPO_W] (faster win = higher)
 
+// Per-Pokémon strategic value: a mon that checks/threatens the opponent's alive team is worth more (the
+// alive-bonus is scaled by this), so the AI preserves its key mons + targets the opponent's key mons.
+const VALUE_K = 0.08; // how strongly a mon's type matchup vs the alive foes shifts its value (gentle)
+const VALUE_MIN = 0.7; // tight bounds keep the nudge from overriding the search when the type proxy is wrong
+const VALUE_MAX = 1.3;
+
 const P1 = "p1";
 const P2 = "p2";
 type SideID = "p1" | "p2";
@@ -290,13 +296,30 @@ function hpShare(side: any): number {
   return max ? cur / max : 0;
 }
 
-// Aggression-weighted team strength: each SURVIVING mon is worth `aliveBonus + its HP fraction`. The
-// alive bonus makes removing a mon (a KO) a large swing, so the search values finishing mons and
-// eliminating the opponent over preserving its own low-HP mons — i.e. it attacks and secures KOs.
-function teamStrength(side: any, aliveBonus: number): number {
+// Strategic value of one mon vs the opponent's ALIVE team: how well it threatens them (best STAB-type
+// effectiveness) minus how hard they hit it, averaged over the alive foes. A mon that checks/answers what
+// the opponent has left is worth preserving; one that's walled is expendable. Bounded so it only nudges.
+function monValue(monTypes: string[], aliveFoeTypes: string[][]): number {
+  if (!aliveFoeTypes.length || !monTypes.length) return 1;
+  let sum = 0;
+  for (const ft of aliveFoeTypes) {
+    const offense = monTypes.reduce((mx, t) => Math.max(mx, typeEff(t, ft)), 0); // I hit them
+    const defense = ft.reduce((mx, t) => Math.max(mx, typeEff(t, monTypes)), 0); // they hit me
+    sum += offense - defense;
+  }
+  const check = sum / aliveFoeTypes.length; // ~[-4, 4]
+  return Math.max(VALUE_MIN, Math.min(VALUE_MAX, 1 + VALUE_K * check));
+}
+
+// Aggression-weighted team strength: each SURVIVING mon is worth `aliveBonus·monValue + its HP fraction`.
+// The alive bonus makes removing a mon (a KO) a large swing, and per-mon value makes the AI preserve its
+// key mons and prize KOing the opponent's — i.e. it attacks and secures KOs, situationally.
+function teamStrength(side: any, aliveBonus: number, aliveFoeTypes: string[][]): number {
   let s = 0;
   for (const p of side.pokemon) {
-    if (p && p.hp > 0 && !p.fainted) s += aliveBonus + Math.max(0, p.hp) / (p.maxhp || 1);
+    if (p && p.hp > 0 && !p.fainted) {
+      s += aliveBonus * monValue(p.types ?? [], aliveFoeTypes) + Math.max(0, p.hp) / (p.maxhp || 1);
+    }
   }
   return s;
 }
@@ -310,15 +333,21 @@ export function evalState(battle: any, chart?: Matchup, aggression = 0): number 
   let v: number;
   if (aggression > 0) {
     const B = ALIVE_BONUS_K * aggression;
-    const s1 = teamStrength(battle.p1, B);
-    const s2 = teamStrength(battle.p2, B);
-    // Full-team strength each side could have (brought size × per-mon max) — the baseline "damage dealt"
-    // is measured against. Weight damage DEALT to the foe above preserving one's own HP, so the AI
-    // presses attacks and secures KOs instead of Protecting/switching to preserve itself.
-    const full = (side: any) => side.pokemon.length * (B + 1);
+    const aliveTypes = (side: any): string[][] =>
+      side.pokemon.filter(monAlive).map((p: any) => p.types ?? []);
+    const foesOfP1 = aliveTypes(battle.p2); // p1's mons are valued vs the alive p2 team, and vice-versa
+    const foesOfP2 = aliveTypes(battle.p1);
+    // Max strength a side could have (every mon full), value-weighted — the baseline "damage dealt" is
+    // measured against, so removing a HIGH-VALUE opponent mon counts as more damage (target their key mons).
+    const full = (side: any, foeTypes: string[][]) =>
+      side.pokemon.reduce((sum: number, p: any) => sum + B * monValue(p?.types ?? [], foeTypes) + 1, 0);
+    const s1 = teamStrength(battle.p1, B, foesOfP1);
+    const s2 = teamStrength(battle.p2, B, foesOfP2);
+    // Weight damage DEALT to the foe above preserving one's own HP, so the AI presses KOs — but per-mon
+    // value makes it preserve its own key mons and prize removing the opponent's, so aggression is situational.
     const wO = 1 + OFFENSE_K * aggression;
-    const scoreP1 = wO * Math.max(0, full(battle.p2) - s2) + s1; // p1's offense (dmg to p2) + p1's defense
-    const scoreP2 = wO * Math.max(0, full(battle.p1) - s1) + s2;
+    const scoreP1 = wO * Math.max(0, full(battle.p2, foesOfP2) - s2) + s1; // p1's offense (dmg to p2) + defense
+    const scoreP2 = wO * Math.max(0, full(battle.p1, foesOfP1) - s1) + s2;
     v = scoreP1 + scoreP2 > 0 ? scoreP1 / (scoreP1 + scoreP2) : 0.5;
   } else {
     const a = hpShare(battle.p1);
