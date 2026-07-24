@@ -189,7 +189,7 @@ export default function BattlePage() {
           {
             n: 3,
             label: "3 · Adaptive",
-            tip: "Thinks with a Monte Carlo search: it plays the game out to its endgames, steers toward the best winning line, and learns your tendencies (including your reads) to play against you. Takes up to ~15s per move.",
+            tip: "Thinks with a Monte Carlo search: it plays the game out to its endgames, steers toward the best winning line, and learns your tendencies (including your reads) to play against you. Takes up to ~15s per move — and up to a minute at Team Preview to plan its team.",
           },
         ].map((lvl) => {
           // Custom teams always use the Level 3 Monte Carlo AI, so lock the lower levels out.
@@ -296,7 +296,15 @@ function MctsPlanBar({ snapshot }: { snapshot: BattleSnapshot }) {
       {snapshot.searching ? (
         <span className="mcts-thinking">
           <span className="mcts-spinner" aria-hidden="true" />
-          Rival AI is thinking… <span className="mcts-dim">(Monte Carlo search, up to ~15s)</span>
+          {snapshot.planningTeam ? (
+            <>
+              Rival AI is planning its team… <span className="mcts-dim">(Monte Carlo search, up to ~60s)</span>
+            </>
+          ) : (
+            <>
+              Rival AI is thinking… <span className="mcts-dim">(Monte Carlo search, up to ~15s)</span>
+            </>
+          )}
         </span>
       ) : (
         <span className="mcts-eval">

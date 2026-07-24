@@ -88,6 +88,7 @@ export interface BattleSnapshot {
   // Level 3 (Monte Carlo) live plan: true while the AI is searching; its self-estimated win chance
   // (0..1, the Rival AI's perspective); and the endgame it's steering toward (p2 species left standing).
   searching: boolean;
+  planningTeam?: boolean; // the current search is the (longer, ~60s) Team Preview decision
   winProb?: number;
   endgame?: string[];
 }
@@ -221,6 +222,7 @@ export class BattleController {
       ended: false,
       winner: null,
       searching: false,
+      planningTeam: false,
     };
     if (level >= 3) {
       installSimSerializationFix(); // needed before serializing the live battle for the searcher
@@ -555,7 +557,7 @@ export class BattleController {
   // Decide the Rival AI's (p2) move by Monte Carlo search: snapshot the live full-information battle,
   // search off-thread (time-boxed), then report the endgame it's steering toward. Kicked off the moment
   // the AI's request arrives, so it thinks while the human is still choosing.
-  private async decideP2(_request: any): Promise<string> {
+  private async decideP2(request: any): Promise<string> {
     let battleJSON = "";
     try {
       const live = this.rawStream.battle;
@@ -564,20 +566,24 @@ export class BattleController {
     } catch {
       return "default"; // couldn't snapshot the position → let the engine pick a legal default
     }
+    // Team Preview (which 4 of 6 + leads) is the biggest decision — give it a full minute; moves get 15s.
+    const isTeamPreview = !!request?.teamPreview;
     this.snapshot.searching = true;
+    this.snapshot.planningTeam = isTeamPreview;
     this.emit();
 
     const opponent = mergeModels(this.persistedModel, this.gameModel);
     const decision = await this.runSearch({
       battleJSON,
-      budget: 6000, // high ceiling; the 15s deadline is what usually stops the search
-      deadlineMs: 15000,
+      budget: isTeamPreview ? 100000 : 6000, // high ceiling so the deadline is what stops the search
+      deadlineMs: isTeamPreview ? 60000 : 15000,
       chart: this.opts?.matchup, // undefined when the pre-battle chart toggle is off → pure MCTS
       opponent,
     });
     if (this.destroyed) return decision.choice;
 
     this.snapshot.searching = false;
+    this.snapshot.planningTeam = false;
     this.snapshot.winProb = decision.winProb;
     this.snapshot.endgame = decision.endgame;
     const reason = endgameReason(decision);
