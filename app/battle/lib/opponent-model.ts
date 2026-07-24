@@ -138,7 +138,9 @@ export function sampleCount(model: OpponentModel): number {
 // AI never entirely stops respecting game theory). Grows with the number of observations.
 export function priorWeight(model: OpponentModel): number {
   const n = sampleCount(model);
-  return Math.min(0.7, n / (n + 20));
+  // Capped low (~35%): the model is a coarse type-bucket proxy, so a wrong read must never dominate the
+  // AI's best response — it may only nudge p1's modeled strategy, keeping play close to pure win-max.
+  return Math.min(0.35, n / (n + 20));
 }
 
 // Prior distribution over one factor's legal tokens for the current matchup bucket: split the bucket's

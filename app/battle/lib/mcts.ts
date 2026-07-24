@@ -26,8 +26,14 @@ export const DEFAULTS = {
   teamBudget: 450, // iterations for the (larger) Team Preview decision
   rolloutTurnCap: 40, // playout depth cap before falling back to a neutral HP eval
   megaRolloutProb: 0.5, // chance the light rollout policy Mega Evolves when able (varied timing)
-  aggression: 0.6, // interactive Level 3 aggression (0 = neutral HP-share; higher = seek KOs, close fast)
+  aggression: 0.6, // legacy eval-bias aggression (interactive path now uses 0 + an aggressive tie-break)
 };
+
+// Aggressive tie-break (interactive Level 3): the search maximizes win chance; among moves whose win
+// estimate is within TIE_EPS of the best (and sampled at least MIN_SAMPLES times, so the estimate is
+// trustworthy) it takes the most aggressive one — pressing when it's free, never trading away win chance.
+const TIE_EPS = 0.04;
+const MIN_SAMPLES = 3;
 
 // Aggression tuning (all scale with the `aggression` value; 0 reproduces the old eval exactly):
 const ALIVE_BONUS_K = 1.5; // a surviving mon is worth aliveBonus (=K*aggression) beyond its HP → a KO is a big swing
@@ -521,6 +527,29 @@ function forkFrom(snapshot: string): any {
   return b;
 }
 
+// How "aggressive" a candidate choice token is, for the win-chance-preserving tie-break: switches are the
+// least aggressive (0), status/Protect low, and an attacking move scores by the damage it threatens
+// (basePower × STAB × best type-effectiveness vs the alive foes) — so among equally-winning options the AI
+// takes the biggest hit / the KO.
+function attackScore(root: any, side: SideID, slot: number, token: string): number {
+  const t = (token || "").trim();
+  if (!t || t === "pass" || t.startsWith("switch")) return 0;
+  const m = /^move\s+(\d+)/.exec(t);
+  if (!m) return 0;
+  const req = root[side]?.activeRequest;
+  const mv = req?.active?.[slot]?.moves?.[parseInt(m[1], 10) - 1];
+  if (!mv) return 0;
+  const move = Dex.moves.get(mv.id || mv.move);
+  if (!move || move.category === "Status") return 0.3; // status / Protect: mildly "active", below any attack
+  const myTypes: string[] = root[side]?.active?.[slot]?.types ?? [];
+  const stab = myTypes.includes(move.type) ? 1.5 : 1;
+  const foe = root[other(side)];
+  let eff = 0;
+  for (const k of aliveActiveIdx(foe)) eff = Math.max(eff, typeEff(move.type, foe.active[k]?.types ?? []));
+  if (!aliveActiveIdx(foe).length) eff = 1;
+  return (move.basePower || 0) * stab * eff + 1; // +1 so any attack outranks status(0.3)/switch(0)
+}
+
 // ---- The search ---------------------------------------------------------------------------------
 
 export interface SideResult {
@@ -538,6 +567,7 @@ export interface SearchOpts {
   chart?: Matchup; // pre-battle matchup chart (p2's view) folded into leaf evaluation
   opponent?: OpponentModel; // learned p1 behavioral model → bias p1's strategy (exploitative play)
   aggression?: number; // 0 = neutral HP-share eval; higher = seek KOs and close games faster
+  aggressiveTieBreak?: boolean; // pick the most aggressive move among ~equally-winning ones (no strength cost)
 }
 
 // Blend two distributions: (1-l)·a + l·b.
@@ -551,7 +581,7 @@ function mix(a: number[], b: number[], l: number): number[] {
  * Returns, per acting side, a mixed strategy and a choice sampled from its equilibrium average.
  */
 export function search(root: any, rng: Rng, budget: number, opts: SearchOpts = {}): SearchResult {
-  const { deadlineMs, chart, opponent, aggression = 0 } = opts;
+  const { deadlineMs, chart, opponent, aggression = 0, aggressiveTieBreak = false } = opts;
   const decisions: Partial<Record<SideID, SideDecision>> = {};
   const learners: Partial<Record<SideID, Learner[]>> = {};
   for (const sid of [P1, P2] as SideID[]) {
@@ -642,12 +672,20 @@ export function search(root: any, rng: Rng, budget: number, opts: SearchOpts = {
   const out: SearchResult = {};
   for (const sid of acting) {
     const Ls = learners[sid]!;
+    const d = decisions[sid]!;
     const strat = Ls.map((L) => avgStrategy(L));
-    const pk = Ls.map((L, fi) => sample(L.acts, strat[fi], rng));
+    // Per-factor active slot (for the tie-break's attackScore); teampreview factors map to slot 0.
+    const slotOf = d.factors.map((_f, fi) => {
+      const s = d.slotMap.findIndex((m) => m === fi);
+      return s < 0 ? 0 : s;
+    });
+    const pk = Ls.map((L, fi) =>
+      aggressiveTieBreak ? tieBreakPick(L, root, sid, slotOf[fi], rng) : sample(L.acts, strat[fi], rng)
+    );
     const value = Ls.length ? Ls.reduce((s, L) => s + L.V, 0) / Ls.length : 0.5;
     out[sid] = {
       choice: assemble(
-        decisions[sid]!,
+        d,
         pk.map((idx, fi) => Ls[fi].acts[idx])
       ),
       strategy: strat,
@@ -656,6 +694,37 @@ export function search(root: any, rng: Rng, budget: number, opts: SearchOpts = {
     };
   }
   return out;
+}
+
+// Win-chance-preserving aggressive selection for one factor: among the actions whose value estimate is
+// within TIE_EPS of the best (and sampled ≥ MIN_SAMPLES times, so the estimate is trustworthy), take the
+// most aggressive (highest attackScore). Uniquely-best actions are just picked → win chance is never
+// traded away beyond TIE_EPS; only genuine ties resolve toward pressing.
+function tieBreakPick(L: Learner, root: any, sid: SideID, slot: number, rng: Rng): number {
+  const Q = L.acts.map((a) => {
+    const n = L.N.get(a) || 0;
+    return n > 0 ? (L.W.get(a) || 0) / n : L.V;
+  });
+  const sampled = (i: number) => (L.N.get(L.acts[i]) || 0) >= MIN_SAMPLES;
+  let bestQ = -Infinity;
+  for (let i = 0; i < L.acts.length; i++) if (sampled(i) && Q[i] > bestQ) bestQ = Q[i];
+  if (bestQ === -Infinity) {
+    // Nothing sampled enough (tiny budget) → just take the raw argmax value.
+    let bi = 0;
+    for (let i = 1; i < Q.length; i++) if (Q[i] > Q[bi]) bi = i;
+    return bi;
+  }
+  let best = -1;
+  let bestScore = -Infinity;
+  for (let i = 0; i < L.acts.length; i++) {
+    if (!sampled(i) || Q[i] < bestQ - TIE_EPS) continue; // must be a near-best, trustworthy action
+    const sc = attackScore(root, sid, slot, L.acts[i]);
+    if (sc > bestScore || (sc === bestScore && rng() < 0.5)) {
+      bestScore = sc;
+      best = i;
+    }
+  }
+  return best >= 0 ? best : 0;
 }
 
 // Endgame projection for the reasoning panel: given p2's chosen move, sample how the game tends to
