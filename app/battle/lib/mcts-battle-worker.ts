@@ -55,6 +55,8 @@ ctx.onmessage = (e: MessageEvent<BattleWorkerIn>) => {
       // presses when it's free without ever trading away win chance.
       aggression: 0,
       aggressiveTieBreak: true,
+      // Prioritize disarming the player: focus-fire / disrupt their biggest threats, and value removing them.
+      threatFocus: true,
     });
     const p2 = res.p2;
     const choice = p2?.choice ?? "default";
