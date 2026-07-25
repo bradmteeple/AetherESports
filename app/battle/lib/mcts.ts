@@ -35,6 +35,19 @@ export const DEFAULTS = {
 const TIE_EPS = 0.04;
 const MIN_SAMPLES = 3;
 
+// Threat prioritization (interactive Level 3): rank the player's mons by how dangerous they are to the AI
+// (super-effective type coverage × raw offense/speed × current HP) so the tie-break focus-fires / disrupts
+// the biggest threat, and — when threatFocus is on — the win proxy values removing it. All type/stat proxies
+// (no dependence on the player's actual moves), consistent with monValue/stabThreat elsewhere.
+const THREAT_W = 1.0; // attack tie-break: a hit on the top threat scores up to (1+THREAT_W)× the same hit on a non-threat
+const THREAT_OFF_REF = 130; // offensive-stat scale (a hard hitter ≈ 130+ Atk/SpA at Lv 50)
+const THREAT_SPE_REF = 150; // speed scale for the gentle "faster = scarier" bonus
+const DISRUPT_PHAZE = 90; // pseudo-basePower for forcing out / locking the top threat (below a real KO-threatening hit)
+const DISRUPT_DEBUFF = 55; // pseudo-basePower for status / stat-drops that cripple the top threat
+const EVAL_THREAT_K = 0.3; // gated win proxy: how strongly a mon's HP is weighted by its danger to the foe
+const EVAL_THREAT_MIN = 0.7; // danger-weight bounds (gentle, like monValue) so it refines rather than distorts
+const EVAL_THREAT_MAX = 1.3;
+
 // Aggression tuning (all scale with the `aggression` value; 0 reproduces the old eval exactly):
 const ALIVE_BONUS_K = 1.5; // a surviving mon is worth aliveBonus (=K*aggression) beyond its HP → a KO is a big swing
 const OFFENSE_K = 1.0; // damage DEALT weighted (1 + OFFENSE_K*aggression)× vs preserving own HP (kept mild so it doesn't trade badly)
@@ -302,6 +315,32 @@ function hpShare(side: any): number {
   return max ? cur / max : 0;
 }
 
+// How dangerous a mon is to `foeActiveTypes`, as a gentle bounded HP multiplier around 1 (type SE × offense).
+function threatWeight(p: any, foeActiveTypes: string[][]): number {
+  const t: string[] = p?.types ?? [];
+  let typeComp = foeActiveTypes.length ? 0 : 1;
+  for (const ft of foeActiveTypes) typeComp = Math.max(typeComp, stabThreat(t, ft));
+  typeComp = Math.max(0.5, Math.min(2, typeComp || 0.5));
+  const off = Math.min(1.5, offStat(p) / THREAT_OFF_REF);
+  const danger = typeComp * off; // ~0.25 (walled/weak) .. 3 (SE hard hitter)
+  return Math.max(EVAL_THREAT_MIN, Math.min(EVAL_THREAT_MAX, 1 + EVAL_THREAT_K * (danger - 1)));
+}
+
+// Threat-weighted HP share: each mon's HP counts for more when that mon is dangerous to the foe's active,
+// so losing a key threat costs a side more "strength" than losing a benign mon → the search values removing
+// the opponent's dangerous mons (and preserving its own). Symmetric, so it refines the win proxy, not tilts it.
+function threatWeightedShare(side: any, foeSide: any): number {
+  const foeTypes = aliveActiveIdx(foeSide).map((k) => foeSide.active[k]?.types ?? []);
+  let cur = 0,
+    max = 0;
+  for (const p of side.pokemon) {
+    const w = threatWeight(p, foeTypes);
+    cur += Math.max(0, p.hp) * w;
+    max += (p.maxhp || 1) * w;
+  }
+  return max ? cur / max : 0;
+}
+
 // Strategic value of one mon vs the opponent's ALIVE team: how well it threatens them (best STAB-type
 // effectiveness) minus how hard they hit it, averaged over the alive foes. A mon that checks/answers what
 // the opponent has left is worth preserving; one that's walled is expendable. Bounded so it only nudges.
@@ -331,11 +370,12 @@ function teamStrength(side: any, aliveBonus: number, aliveFoeTypes: string[][]):
 }
 
 // Leaf evaluation when a rollout hits the depth cap (p1's view, higher = better for p1).
-// - aggression === 0: the original symmetric HP share (Auto Battle unchanged, byte-for-byte).
+// - aggression === 0: the symmetric HP share (Auto Battle unchanged, byte-for-byte) — optionally weighted
+//   by each mon's danger to the foe (threatFocus) so removing the opponent's key threats scores higher.
 // - aggression  >  0: KO-seeking alive-bonus strength ratio, clamped to [TEMPO_W, 1-TEMPO_W] so a real
 //   win/loss (see playout) always outranks any non-terminal position.
 // An optional pre-battle chart gently tilts the value toward p2 when it holds favorable matchups.
-export function evalState(battle: any, chart?: Matchup, aggression = 0): number {
+export function evalState(battle: any, chart?: Matchup, aggression = 0, threatFocus = false): number {
   let v: number;
   if (aggression > 0) {
     const B = ALIVE_BONUS_K * aggression;
@@ -356,8 +396,8 @@ export function evalState(battle: any, chart?: Matchup, aggression = 0): number 
     const scoreP2 = wO * Math.max(0, full(battle.p1, foesOfP1) - s1) + s2;
     v = scoreP1 + scoreP2 > 0 ? scoreP1 / (scoreP1 + scoreP2) : 0.5;
   } else {
-    const a = hpShare(battle.p1);
-    const b = hpShare(battle.p2);
+    const a = threatFocus ? threatWeightedShare(battle.p1, battle.p2) : hpShare(battle.p1);
+    const b = threatFocus ? threatWeightedShare(battle.p2, battle.p1) : hpShare(battle.p2);
     v = a + b > 0 ? a / (a + b) : 0.5;
   }
   // Lower v is better for p2, so subtract p2's chart advantage. Bounded so real simulation dominates.
@@ -454,7 +494,7 @@ function lightChoice(battle: any, side: SideID, rng: Rng): string {
   return "default";
 }
 
-function playout(battle: any, rng: Rng, cap: number, chart?: Matchup, aggression = 0): number {
+function playout(battle: any, rng: Rng, cap: number, chart?: Matchup, aggression = 0, threatFocus = false): number {
   let turns = 0;
   while (!battle.ended && turns < cap) {
     const ok = applyChoices(battle, {
@@ -464,7 +504,7 @@ function playout(battle: any, rng: Rng, cap: number, chart?: Matchup, aggression
     if (!ok) break; // sim end-state quirk → score the position we reached
     if (battle.requestState === "move") turns++;
   }
-  if (!battle.ended) return evalState(battle, chart, aggression);
+  if (!battle.ended) return evalState(battle, chart, aggression, threatFocus);
   const tv = terminalValue(battle);
   // Tempo: prefer FASTER wins (and slower losses). Wins land in [1-TEMPO_W, 1], losses in [0, TEMPO_W],
   // so a real result always outranks any non-terminal eval — the AI still plays purely to win.
@@ -527,10 +567,81 @@ function forkFrom(snapshot: string): any {
   return b;
 }
 
-// How "aggressive" a candidate choice token is, for the win-chance-preserving tie-break: switches are the
-// least aggressive (0), status/Protect low, and an attacking move scores by the damage it threatens
-// (basePower × STAB × best type-effectiveness vs the alive foes) — so among equally-winning options the AI
-// takes the biggest hit / the KO.
+// ---- Threat model: which of the foe's mons is the biggest danger to `side` right now ----------------
+
+// Best STAB super-effective multiplier of `atkTypes` vs `defTypes` (local copy; mirrors opponent-model).
+function stabThreat(atkTypes: string[], defTypes: string[]): number {
+  return atkTypes.reduce((mx, t) => Math.max(mx, typeEff(t, defTypes)), 0);
+}
+
+// A mon's best offensive stat / speed, read from the sim's computed battle stats (falls back gracefully).
+function offStat(p: any): number {
+  const st = p?.baseStoredStats || p?.storedStats || p?.species?.baseStats || {};
+  return Math.max(st.atk || 0, st.spa || 0) || 80;
+}
+function monSpeed(p: any): number {
+  const st = p?.baseStoredStats || p?.storedStats || p?.species?.baseStats || {};
+  return st.spe || p?.speed || 80;
+}
+
+// How dangerous foe mon `p` is to the defender's alive active mons: SE type coverage × raw offense ×
+// a gentle speed bonus × its current HP fraction. A fast, hard-hitting, super-effective, healthy mon is
+// the priority target; already-chipped or walled mons rank lower.
+function threatScore(p: any, defenderTypes: string[][]): number {
+  if (!p || p.hp <= 0 || p.fainted) return 0;
+  const foeTypes: string[] = p.types ?? [];
+  let typeComp = defenderTypes.length ? 0 : 1;
+  for (const dt of defenderTypes) typeComp = Math.max(typeComp, stabThreat(foeTypes, dt));
+  typeComp = Math.max(0.5, Math.min(4, typeComp || 0.5)); // neutral ≈ 1, SE ≈ 2, never zero
+  const off = offStat(p) / THREAT_OFF_REF; // ~1 for a strong attacker
+  const speFactor = 0.7 + 0.3 * Math.min(1.4, monSpeed(p) / THREAT_SPE_REF);
+  const hpFrac = Math.max(0, p.hp) / (p.maxhp || 1);
+  return typeComp * off * speFactor * hpFrac;
+}
+
+// Per-foe-slot threat, normalized so the biggest current threat ≈ 1 and the rest scale below it.
+function foeThreatNorms(root: any, side: SideID): number[] {
+  const me = root[side];
+  const foe = root[other(side)];
+  const myTypes = aliveActiveIdx(me).map((k) => me.active[k]?.types ?? []);
+  const raw = [0, 1].map((k) => (foe.active?.[k] ? threatScore(foe.active[k], myTypes) : 0));
+  const mx = Math.max(raw[0], raw[1], 1e-9);
+  return raw.map((r) => r / mx);
+}
+
+// Read the single foe slot a token targets ("move 1 2" → foe idx 1). Ally/self ("-1") or spread/no-target
+// ("move 4") → null (no single foe). Mirrors the suffix written by moveSlotTokens.
+function moveTargetFoeIdx(token: string): number | null {
+  const m = /^move\s+\d+\s+(\d+)\b/.exec((token || "").trim());
+  return m ? parseInt(m[1], 10) - 1 : null;
+}
+
+// True iff a move carries a negative stat change onto the target (direct .boosts or a secondary rider).
+function hasNegBoost(move: any): boolean {
+  const neg = (b: any) => !!b && Object.values(b).some((v: any) => (v as number) < 0);
+  if (neg(move?.boosts)) return true;
+  const secs = move?.secondary ? [move.secondary] : move?.secondaries || [];
+  return secs.some((s: any) => neg(s?.boosts));
+}
+
+// If a status move disarms a threat (phaze, cripple, or lock it down), score it by the threat it hits —
+// so putting the biggest threat in a bad spot outranks a weak poke, but stays below a real KO-threatening
+// attack. Non-disarming status (Protect, setup, screens, weather) returns null → caller uses the 0.3 floor.
+function disruptionScore(move: any, threatHit: number): number | null {
+  if (!move) return null;
+  const id = move.id || "";
+  if (move.forceSwitch) return DISRUPT_PHAZE * threatHit + 1; // Roar / Whirlwind — remove the threat from the field
+  const locks = /^(taunt|encore|disable|torment|healblock)$/.test(id);
+  const inflicts = !!move.status && move.category === "Status"; // T-Wave / WoW / Spore / Toxic
+  if (inflicts || locks || hasNegBoost(move)) return DISRUPT_DEBUFF * threatHit + 1;
+  return null;
+}
+
+// How "aggressive"/threatening a candidate choice token is, for the win-chance-preserving tie-break:
+// switches are least aggressive (0); a damaging move scores by the damage it threatens the TARGETED foe
+// (basePower × STAB × type-effectiveness) scaled up when that foe is a big threat; a disarming status move
+// scores by the threat it neutralizes; other status is a mild 0.3. So among equally-winning options the AI
+// focus-fires / disarms the player's biggest threat.
 function attackScore(root: any, side: SideID, slot: number, token: string): number {
   const t = (token || "").trim();
   if (!t || t === "pass" || t.startsWith("switch")) return 0;
@@ -540,14 +651,25 @@ function attackScore(root: any, side: SideID, slot: number, token: string): numb
   const mv = req?.active?.[slot]?.moves?.[parseInt(m[1], 10) - 1];
   if (!mv) return 0;
   const move = Dex.moves.get(mv.id || mv.move);
-  if (!move || move.category === "Status") return 0.3; // status / Protect: mildly "active", below any attack
+  const foe = root[other(side)];
+  const aliveFoe = aliveActiveIdx(foe);
+  const norm = foeThreatNorms(root, side);
+  const tgt = moveTargetFoeIdx(t);
+  // Foe slots this token actually hits: an explicit single target, else all alive foes (spread) / best.
+  const hitIdxs = tgt != null && aliveFoe.includes(tgt) ? [tgt] : aliveFoe;
+  const threatHit = hitIdxs.reduce((mx, k) => Math.max(mx, norm[k] || 0), 0);
+
+  if (!move || move.category === "Status") {
+    const dis = disruptionScore(move, threatHit);
+    return dis != null ? dis : 0.3; // status / Protect / setup: mildly "active", below any attack
+  }
   const myTypes: string[] = root[side]?.active?.[slot]?.types ?? [];
   const stab = myTypes.includes(move.type) ? 1.5 : 1;
-  const foe = root[other(side)];
   let eff = 0;
-  for (const k of aliveActiveIdx(foe)) eff = Math.max(eff, typeEff(move.type, foe.active[k]?.types ?? []));
-  if (!aliveActiveIdx(foe).length) eff = 1;
-  return (move.basePower || 0) * stab * eff + 1; // +1 so any attack outranks status(0.3)/switch(0)
+  for (const k of hitIdxs) eff = Math.max(eff, typeEff(move.type, foe.active[k]?.types ?? []));
+  if (!hitIdxs.length) eff = 1;
+  const threatMul = 1 + THREAT_W * threatHit; // press the biggest threat hardest
+  return (move.basePower || 0) * stab * eff * threatMul + 1; // +1 so any attack outranks status(0.3)/switch(0)
 }
 
 // ---- The search ---------------------------------------------------------------------------------
@@ -568,6 +690,7 @@ export interface SearchOpts {
   opponent?: OpponentModel; // learned p1 behavioral model → bias p1's strategy (exploitative play)
   aggression?: number; // 0 = neutral HP-share eval; higher = seek KOs and close games faster
   aggressiveTieBreak?: boolean; // pick the most aggressive move among ~equally-winning ones (no strength cost)
+  threatFocus?: boolean; // weight the win proxy by each mon's danger → the search values removing the foe's threats
 }
 
 // Blend two distributions: (1-l)·a + l·b.
@@ -581,7 +704,7 @@ function mix(a: number[], b: number[], l: number): number[] {
  * Returns, per acting side, a mixed strategy and a choice sampled from its equilibrium average.
  */
 export function search(root: any, rng: Rng, budget: number, opts: SearchOpts = {}): SearchResult {
-  const { deadlineMs, chart, opponent, aggression = 0, aggressiveTieBreak = false } = opts;
+  const { deadlineMs, chart, opponent, aggression = 0, aggressiveTieBreak = false, threatFocus = false } = opts;
   const decisions: Partial<Record<SideID, SideDecision>> = {};
   const learners: Partial<Record<SideID, Learner[]>> = {};
   for (const sid of [P1, P2] as SideID[]) {
@@ -641,8 +764,8 @@ export function search(root: any, rng: Rng, budget: number, opts: SearchOpts = {
 
     const applied = applyChoices(fork, choice);
     const v = applied
-      ? playout(fork, rng, DEFAULTS.rolloutTurnCap, chart, aggression)
-      : evalState(fork, chart, aggression);
+      ? playout(fork, rng, DEFAULTS.rolloutTurnCap, chart, aggression, threatFocus)
+      : evalState(fork, chart, aggression, threatFocus);
 
     for (const sid of acting) {
       const val = sid === P1 ? v : 1 - v;
