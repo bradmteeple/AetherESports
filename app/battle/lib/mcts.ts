@@ -48,6 +48,16 @@ const EVAL_THREAT_K = 0.3; // gated win proxy: how strongly a mon's HP is weight
 const EVAL_THREAT_MIN = 0.7; // danger-weight bounds (gentle, like monValue) so it refines rather than distorts
 const EVAL_THREAT_MAX = 1.3;
 
+// Priority & stat-boost awareness (interactive Level 3): teach the heuristic layers (rollout + tie-break)
+// to notice they can pick up quick KOs with priority and to respect existing stat boosts. Bonuses are in the
+// same basePower units as the damage proxy, sized above any normal hit so a KO ranks first; a priority KO
+// ranks above a slower KO (striking first is safer). Setup gets only a gentle, safety-gated nudge.
+const KO_BONUS = 1000; // a move estimated to KO the target outranks any non-KO hit (max normal proxy ≈ 900)
+const PRIO_KO_BONUS = 1500; // ...and a KO delivered by a priority move outranks a slower KO
+const SETUP_SCORE = 60; // rollout score for a safe offensive setup move (below most attacks → used occasionally)
+const SETUP_SAFE_HP = 0.6; // only set up at ≥60% HP (and only when no KO is available), so it stays "when safe"
+const SETUP_PROB = 0.3; // rollout chance to take a safe setup (surfaces setup-sweep value without over-doing it)
+
 // Aggression tuning (all scale with the `aggression` value; 0 reproduces the old eval exactly):
 const ALIVE_BONUS_K = 1.5; // a surviving mon is worth aliveBonus (=K*aggression) beyond its HP → a KO is a big swing
 const OFFENSE_K = 1.0; // damage DEALT weighted (1 + OFFENSE_K*aggression)× vs preserving own HP (kept mild so it doesn't trade badly)
@@ -321,8 +331,8 @@ function threatWeight(p: any, foeActiveTypes: string[][]): number {
   let typeComp = foeActiveTypes.length ? 0 : 1;
   for (const ft of foeActiveTypes) typeComp = Math.max(typeComp, stabThreat(t, ft));
   typeComp = Math.max(0.5, Math.min(2, typeComp || 0.5));
-  const off = Math.min(1.5, offStat(p) / THREAT_OFF_REF);
-  const danger = typeComp * off; // ~0.25 (walled/weak) .. 3 (SE hard hitter)
+  const off = Math.min(2.5, (offStat(p) / THREAT_OFF_REF) * maxOffBoostMul(p)); // a boosted mon is more dangerous
+  const danger = typeComp * off; // ~0.25 (walled/weak) .. 5 (SE boosted hard hitter)
   return Math.max(EVAL_THREAT_MIN, Math.min(EVAL_THREAT_MAX, 1 + EVAL_THREAT_K * (danger - 1)));
 }
 
@@ -409,12 +419,37 @@ export function evalState(battle: any, chart?: Matchup, aggression = 0, threatFo
 
 // ---- Light rollout policy (playouts only) -------------------------------------------------------
 
-function bestDamageToken(battle: any, side: SideID, slotIdx: number, req: any, rng: Rng): string {
+function bestDamageToken(battle: any, side: SideID, slotIdx: number, req: any, rng: Rng, smart = false): string {
   const s = battle[side];
   const a = req.active[slotIdx];
   const foe = battle[other(side)];
   const foeAlive = aliveActiveIdx(foe);
-  const myTypes: string[] = s.active[slotIdx]?.types ?? [];
+  const mon = s.active[slotIdx];
+  const myTypes: string[] = mon?.types ?? [];
+
+  // smartRollout: occasionally set up when it's clearly safe — only if we can't just take a KO this turn and
+  // we're healthy. This lets playouts discover setup-sweep value without wasting turns (the KO/priority
+  // scoring below still wins whenever a KO is on the table).
+  if (smart && mon) {
+    const hpFrac = Math.max(0, mon.hp) / (mon.maxhp || 1);
+    let koAvailable = false;
+    for (const m of a.moves || []) {
+      if (m.disabled) continue;
+      const mv = Dex.moves.get(m.id || m.move);
+      if (foeAlive.some((k) => canKO(mon, foe.active[k], mv))) {
+        koAvailable = true;
+        break;
+      }
+    }
+    if (!koAvailable && hpFrac >= SETUP_SAFE_HP) {
+      for (let i = 0; i < (a.moves || []).length; i++) {
+        const m = a.moves[i];
+        if (m.disabled) continue;
+        if (isOffSetup(Dex.moves.get(m.id || m.move), mon) && rng() < SETUP_PROB) return "move " + (i + 1);
+      }
+    }
+  }
+
   let best = "";
   let bestScore = -1;
   const consider = (tok: string, score: number) => {
@@ -423,28 +458,36 @@ function bestDamageToken(battle: any, side: SideID, slotIdx: number, req: any, r
       best = tok;
     }
   };
+  const koBonus = (mv: any, k: number): number => {
+    if (!smart || !canKO(mon, foe.active[k], mv)) return 0;
+    return KO_BONUS + ((mv.priority || 0) > 0 ? PRIO_KO_BONUS : 0); // finish weakened foes, prefer priority
+  };
   (a.moves || []).forEach((m: any, mi0: number) => {
     if (m.disabled) return;
     const mi = mi0 + 1;
     const mv = Dex.moves.get(m.id || m.move);
     const tgt = m.target;
     if (mv.category === "Status") {
-      consider("move " + mi, 5); // low baseline so status is used occasionally
+      const setup = smart && mon && isOffSetup(mv, mon) && Math.max(0, mon.hp) / (mon.maxhp || 1) >= SETUP_SAFE_HP;
+      consider("move " + mi, setup ? SETUP_SCORE : 5); // low baseline so status is used occasionally
       return;
     }
     const stab = myTypes.includes(mv.type) ? 1.5 : 1;
+    const offMul = smart ? boostMul(offStageFor(mon, mv)) : 1; // my boosts make this hit harder
     if (tgt === "normal" || tgt === "any" || tgt === "adjacentFoe") {
       const targets = foeAlive.length ? foeAlive : [0];
       for (const k of targets) {
         const dt = foe.active[k]?.types ?? [];
-        const score = (mv.basePower || 0) * stab * typeEff(mv.type, dt);
+        const score = (mv.basePower || 0) * stab * typeEff(mv.type, dt) * offMul + koBonus(mv, k);
         consider("move " + mi + " " + (k + 1), score);
       }
     } else {
       // spread / self / field: score against the best foe matchup
       let eff = 1;
       for (const k of foeAlive) eff = Math.max(eff, typeEff(mv.type, foe.active[k]?.types ?? []));
-      consider("move " + mi, (mv.basePower || 0) * stab * eff);
+      let score = (mv.basePower || 0) * stab * eff * offMul;
+      if (smart) for (const k of foeAlive) { const kb = koBonus(mv, k); if (kb) { score += kb; break; } }
+      consider("move " + mi, score);
     }
   });
   if (!best) best = "move 1";
@@ -452,7 +495,7 @@ function bestDamageToken(battle: any, side: SideID, slotIdx: number, req: any, r
   return best;
 }
 
-function lightChoice(battle: any, side: SideID, rng: Rng): string {
+function lightChoice(battle: any, side: SideID, rng: Rng, smart = false): string {
   const s = battle[side];
   const req = s.activeRequest;
   if (req.teamPreview) {
@@ -482,7 +525,7 @@ function lightChoice(battle: any, side: SideID, rng: Rng): string {
     const toks = req.active.map((a: any, i: number) => {
       const mon = s.active[i];
       if (!a || !mon || mon.fainted) return "pass";
-      let tok = bestDamageToken(battle, side, i, req, rng);
+      let tok = bestDamageToken(battle, side, i, req, rng, smart);
       if (tok.endsWith(" mega")) {
         if (megaUsed) tok = tok.slice(0, -5);
         else megaUsed = true;
@@ -494,12 +537,12 @@ function lightChoice(battle: any, side: SideID, rng: Rng): string {
   return "default";
 }
 
-function playout(battle: any, rng: Rng, cap: number, chart?: Matchup, aggression = 0, threatFocus = false): number {
+function playout(battle: any, rng: Rng, cap: number, chart?: Matchup, aggression = 0, threatFocus = false, smartRollout = false): number {
   let turns = 0;
   while (!battle.ended && turns < cap) {
     const ok = applyChoices(battle, {
-      p1: sideActs(battle.p1) ? lightChoice(battle, P1, rng) : undefined,
-      p2: sideActs(battle.p2) ? lightChoice(battle, P2, rng) : undefined,
+      p1: sideActs(battle.p1) ? lightChoice(battle, P1, rng, smartRollout) : undefined,
+      p2: sideActs(battle.p2) ? lightChoice(battle, P2, rng, smartRollout) : undefined,
     });
     if (!ok) break; // sim end-state quirk → score the position we reached
     if (battle.requestState === "move") turns++;
@@ -584,6 +627,64 @@ function monSpeed(p: any): number {
   return st.spe || p?.speed || 80;
 }
 
+// In-battle stat-stage multiplier (Gen mechanics): +1 → 1.5×, +2 → 2×, −1 → 0.66×, etc. (clamped ±6).
+function boostMul(stage: number): number {
+  const s = Math.max(-6, Math.min(6, stage || 0));
+  return s >= 0 ? (2 + s) / 2 : 2 / (2 - s);
+}
+
+// A mon's largest current OFFENSIVE boost multiplier (Atk or SpA) — used to treat a set-up sweeper as a
+// bigger threat (foe) or a more valuable asset (self).
+function maxOffBoostMul(p: any): number {
+  const b = p?.boosts || {};
+  return boostMul(Math.max(b.atk || 0, b.spa || 0));
+}
+
+// The attacker's boost stage for a move's damage category (physical → Atk stage, special → SpA stage).
+function offStageFor(p: any, move: any): number {
+  const b = p?.boosts || {};
+  return move?.category === "Physical" ? b.atk || 0 : b.spa || 0;
+}
+
+// Rough Lv 50 damage estimate as a FRACTION of the defender's CURRENT HP, folding in offensive/defensive
+// stats, BOTH sides' current stat boosts, STAB, type effectiveness, and the average damage roll. Deliberately
+// ignores abilities/items/weather/screens — a cheap "can this move KO?" gauge for the rollout & tie-break,
+// not an exact calc. Returns 0 for status / no-power / immune moves.
+function estDamageFrac(attacker: any, defender: any, move: any): number {
+  if (!attacker || !defender || !move || move.category === "Status") return 0;
+  const bp = move.basePower || 0;
+  if (bp <= 0) return 0;
+  const eff = typeEff(move.type, defender.types ?? []);
+  if (eff <= 0) return 0; // immune
+  const level = attacker.level || 50;
+  const physical = move.category === "Physical";
+  const aSt = attacker.baseStoredStats || attacker.storedStats || attacker.species?.baseStats || {};
+  const dSt = defender.baseStoredStats || defender.storedStats || defender.species?.baseStats || {};
+  const atk = ((physical ? aSt.atk : aSt.spa) || 80) * boostMul(offStageFor(attacker, move));
+  const def = ((physical ? dSt.def : dSt.spd) || 80) * boostMul(physical ? defender.boosts?.def || 0 : defender.boosts?.spd || 0);
+  const base = ((2 * level) / 5 + 2) * bp * (atk / Math.max(1, def)) / 50 + 2;
+  const stab = (attacker.types ?? []).includes(move.type) ? 1.5 : 1;
+  const dmg = base * stab * eff * 0.925; // average roll
+  return dmg / Math.max(1, defender.hp);
+}
+
+// Whether `move` from `attacker` is estimated to KO `defender` outright (average roll).
+function canKO(attacker: any, defender: any, move: any): boolean {
+  return !!defender && defender.hp > 0 && !defender.fainted && estDamageFrac(attacker, defender, move) >= 1;
+}
+
+// An offensive self-setup move (Swords Dance / Nasty Plot / Dragon Dance …) whose boosted stat isn't near
+// its cap — the kind of move the rollout may take when it's safe.
+function isOffSetup(move: any, mon: any): boolean {
+  if (!move || move.category !== "Status" || move.target !== "self" || !move.boosts) return false;
+  const b = move.boosts;
+  const cur = mon?.boosts || {};
+  if ((b.atk || 0) > 0 && (cur.atk || 0) < 4) return true;
+  if ((b.spa || 0) > 0 && (cur.spa || 0) < 4) return true;
+  if ((b.spe || 0) > 0 && (cur.spe || 0) < 4) return true;
+  return false;
+}
+
 // How dangerous foe mon `p` is to the defender's alive active mons: SE type coverage × raw offense ×
 // a gentle speed bonus × its current HP fraction. A fast, hard-hitting, super-effective, healthy mon is
 // the priority target; already-chipped or walled mons rank lower.
@@ -596,7 +697,7 @@ function threatScore(p: any, defenderTypes: string[][]): number {
   const off = offStat(p) / THREAT_OFF_REF; // ~1 for a strong attacker
   const speFactor = 0.7 + 0.3 * Math.min(1.4, monSpeed(p) / THREAT_SPE_REF);
   const hpFrac = Math.max(0, p.hp) / (p.maxhp || 1);
-  return typeComp * off * speFactor * hpFrac;
+  return typeComp * off * speFactor * hpFrac * maxOffBoostMul(p); // a set-up sweeper is a bigger threat
 }
 
 // Per-foe-slot threat, normalized so the biggest current threat ≈ 1 and the rest scale below it.
@@ -663,13 +764,21 @@ function attackScore(root: any, side: SideID, slot: number, token: string): numb
     const dis = disruptionScore(move, threatHit);
     return dis != null ? dis : 0.3; // status / Protect / setup: mildly "active", below any attack
   }
-  const myTypes: string[] = root[side]?.active?.[slot]?.types ?? [];
+  const meMon = root[side]?.active?.[slot];
+  const myTypes: string[] = meMon?.types ?? [];
   const stab = myTypes.includes(move.type) ? 1.5 : 1;
   let eff = 0;
   for (const k of hitIdxs) eff = Math.max(eff, typeEff(move.type, foe.active[k]?.types ?? []));
   if (!hitIdxs.length) eff = 1;
   const threatMul = 1 + THREAT_W * threatHit; // press the biggest threat hardest
-  return (move.basePower || 0) * stab * eff * threatMul + 1; // +1 so any attack outranks status(0.3)/switch(0)
+  const offMul = boostMul(offStageFor(meMon, move)); // my own boosts make this hit harder
+  let s = (move.basePower || 0) * stab * eff * threatMul * offMul + 1; // +1 so any attack outranks status/switch
+  // Among ~equally-winning moves, grab the quick KO — and prefer one delivered by a priority move (strikes first).
+  if (hitIdxs.some((k) => canKO(meMon, foe.active[k], move))) {
+    s += KO_BONUS;
+    if ((move.priority || 0) > 0) s += PRIO_KO_BONUS;
+  }
+  return s;
 }
 
 // ---- The search ---------------------------------------------------------------------------------
@@ -691,6 +800,7 @@ export interface SearchOpts {
   aggression?: number; // 0 = neutral HP-share eval; higher = seek KOs and close games faster
   aggressiveTieBreak?: boolean; // pick the most aggressive move among ~equally-winning ones (no strength cost)
   threatFocus?: boolean; // weight the win proxy by each mon's danger → the search values removing the foe's threats
+  smartRollout?: boolean; // rollout uses priority for quick KOs, respects stat boosts, sets up occasionally when safe
 }
 
 // Blend two distributions: (1-l)·a + l·b.
@@ -704,7 +814,7 @@ function mix(a: number[], b: number[], l: number): number[] {
  * Returns, per acting side, a mixed strategy and a choice sampled from its equilibrium average.
  */
 export function search(root: any, rng: Rng, budget: number, opts: SearchOpts = {}): SearchResult {
-  const { deadlineMs, chart, opponent, aggression = 0, aggressiveTieBreak = false, threatFocus = false } = opts;
+  const { deadlineMs, chart, opponent, aggression = 0, aggressiveTieBreak = false, threatFocus = false, smartRollout = false } = opts;
   const decisions: Partial<Record<SideID, SideDecision>> = {};
   const learners: Partial<Record<SideID, Learner[]>> = {};
   for (const sid of [P1, P2] as SideID[]) {
@@ -764,7 +874,7 @@ export function search(root: any, rng: Rng, budget: number, opts: SearchOpts = {
 
     const applied = applyChoices(fork, choice);
     const v = applied
-      ? playout(fork, rng, DEFAULTS.rolloutTurnCap, chart, aggression, threatFocus)
+      ? playout(fork, rng, DEFAULTS.rolloutTurnCap, chart, aggression, threatFocus, smartRollout)
       : evalState(fork, chart, aggression, threatFocus);
 
     for (const sid of acting) {
