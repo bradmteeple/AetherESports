@@ -57,6 +57,8 @@ ctx.onmessage = (e: MessageEvent<BattleWorkerIn>) => {
       aggressiveTieBreak: true,
       // Prioritize disarming the player: focus-fire / disrupt their biggest threats, and value removing them.
       threatFocus: true,
+      // Be aware it can use priority for quick KOs and respect stat boosts (its own for KOs, the foe's as threats).
+      smartRollout: true,
     });
     const p2 = res.p2;
     const choice = p2?.choice ?? "default";
