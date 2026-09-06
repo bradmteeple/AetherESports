@@ -4,11 +4,16 @@
 // which owns all the tallying/replay aggregation. It also posts lightweight progress so the page can
 // show a "thinking" indicator.
 //
-// Roster gauntlet: Blue (p1) faces an ordered roster of opponents. The worker owns the "which
-// opponent + when to advance" loop, because it plays games sequentially and can therefore check the
-// dominant-win gate (wilson.ts) the instant a game finishes and switch opponents with zero
-// round-trip. Every finished `game` is tagged with the opponentId it was actually played against, so
-// the controller can attribute records/combos/replays with no ambiguity and no race.
+// Two run modes, both over the same ordered roster of opponents:
+//   • gauntlet — Blue (p1) stays on one opponent until it dominantly beats it (wilson.ts gate), then
+//     advances; finishing the roster completes the run.
+//   • training — Blue rotates through every opponent round-robin (`rotateEvery` games each) and keeps
+//     going until stopped, so evidence accumulates against the whole field rather than the first team
+//     that blocks the gauntlet.
+// The worker owns the "which opponent + when to switch" loop, because it plays games sequentially and
+// can therefore check the gate the instant a game finishes and switch opponents with zero round-trip.
+// Every finished `game` is tagged with the opponentId it was actually played against, so the
+// controller can attribute records/combos/replays with no ambiguity and no race.
 
 import "./node-shim"; // must precede any @pkmn import
 import { installChampionsStats } from "./champions-stats";
@@ -33,10 +38,14 @@ export interface WorkerGame {
   redCombo: string | null;
   blueLead: string | null;
   redLead: string | null;
+  turns: number; // how long the game ran, stored with the game in the library
   lines: string[]; // captured protocol log for the replay
   obsBlue: Book; // Red's moves as observed by Blue (kept for possible future use)
   obsRed: Book;
 }
+
+// How Blue works through the roster. See the header note.
+export type RunMode = "gauntlet" | "training";
 
 // A per-advance snapshot of every opponent's record + confidence, computed by the worker's own gate so
 // the controller can trust which opponents are "beaten" and which one is current.
@@ -68,6 +77,8 @@ type StartMsg = {
   roster: RosterTeam[];
   formatid: string;
   cfg?: GauntletConfig;
+  mode?: RunMode; // defaults to "gauntlet"
+  rotateEvery?: number; // training only: games against one opponent before rotating (default 1)
 };
 type InMsg = StartMsg | { type: "stop" } | { type: "reset" };
 
@@ -230,6 +241,7 @@ async function playOneGame(
     redCombo,
     blueLead: pairKey(p1Lead[0], p1Lead[1]),
     redLead: pairKey(p2Lead[0], p2Lead[1]),
+    turns: battle.turn,
     lines,
     obsBlue,
     obsRed,
@@ -241,8 +253,16 @@ type Rec = { blue: number; red: number; ties: number };
 const decidedOf = (r: Rec) => r.blue + r.red;
 
 // Broadcast every opponent's record + Wilson lower bound as the worker sees it, so the controller can
-// trust which are beaten and which is current. Sent on each advance and on completion.
-function postRosterProgress(roster: RosterTeam[], rec: Rec[], currentIndex: number, cfg: GauntletConfig) {
+// trust which are beaten and which is current. In a gauntlet an opponent counts as beaten once it has
+// been passed; in training nothing is "passed", so the dominant-win gate is applied per opponent for
+// display only — it never changes who Blue plays next.
+function postRosterProgress(
+  roster: RosterTeam[],
+  rec: Rec[],
+  currentIndex: number,
+  cfg: GauntletConfig,
+  mode: RunMode
+) {
   post({
     type: "roster-progress",
     currentIndex,
@@ -253,20 +273,47 @@ function postRosterProgress(roster: RosterTeam[], rec: Rec[], currentIndex: numb
       ties: rec[i].ties,
       decided: decidedOf(rec[i]),
       lowerBound: wilsonLowerBound(rec[i].blue, decidedOf(rec[i]), cfg.z),
-      beaten: i < currentIndex,
+      beaten:
+        mode === "training" ? isDominantWin(rec[i].blue, decidedOf(rec[i]), cfg) : i < currentIndex,
     })),
   });
 }
 
-// Play Blue through the roster in order. Stay on the current opponent until Blue dominantly beats it
-// (wilson.ts gate), then advance. When every opponent is beaten, post `complete`. Never advance a
-// stuck matchup — it plays forever until the user presses Stop.
-async function loop(p1Team: string, roster: RosterTeam[], formatid: string, cfg: GauntletConfig) {
+// Play Blue through the roster.
+//
+// gauntlet: stay on the current opponent until Blue dominantly beats it (wilson.ts gate), then
+// advance; when every opponent is beaten, post `complete`. Never advance a stuck matchup — it plays
+// forever until the user presses Stop.
+//
+// training: rotate round-robin, `rotateEvery` games per opponent, forever. No gate decides where Blue
+// plays next, so a hard matchup can't starve the rest of the roster of games — the point is an even
+// spread of evidence across the whole field. An opponent whose team simply can't be run is dropped
+// from the rotation after repeated failures, and the run only errors out if every opponent is dead.
+async function loop(
+  p1Team: string,
+  roster: RosterTeam[],
+  formatid: string,
+  cfg: GauntletConfig,
+  mode: RunMode,
+  rotateEvery: number
+) {
   const rec: Rec[] = roster.map(() => ({ blue: 0, red: 0, ties: 0 }));
+  const failures: number[] = roster.map(() => 0); // consecutive throws with zero games, per opponent
+  const dead = new Set<number>(); // training: opponents dropped from the rotation
   let idx = 0;
-  let earlyFailures = 0; // consecutive throws with zero completed games against the CURRENT opponent
+  let sinceRotate = 0;
+  let lastError = "";
 
-  while (running && idx < roster.length) {
+  // The next opponent in the rotation that still runs (training only).
+  const nextLive = (from: number): number => {
+    for (let step = 1; step <= roster.length; step++) {
+      const j = (from + step) % roster.length;
+      if (!dead.has(j)) return j;
+    }
+    return -1;
+  };
+
+  while (running && (mode === "training" ? true : idx < roster.length)) {
     const opp = roster[idx];
     try {
       const game = await playOneGame(p1Team, opp.packed, formatid, opp.id, idx);
@@ -276,31 +323,52 @@ async function loop(p1Team: string, roster: RosterTeam[], formatid: string, cfg:
       if (game.result === "blue") rec[idx].blue++;
       else if (game.result === "red") rec[idx].red++;
       else rec[idx].ties++;
-      earlyFailures = 0;
+      failures[idx] = 0;
 
-      // Advance only when Blue has *dominantly* beaten this opponent.
-      if (isDominantWin(rec[idx].blue, decidedOf(rec[idx]), cfg)) {
+      if (mode === "training") {
+        // Rotate on a fixed block of games — every opponent gets studied, in order, indefinitely.
+        if (++sinceRotate >= rotateEvery) {
+          sinceRotate = 0;
+          const j = nextLive(idx);
+          if (j >= 0) idx = j;
+        }
+        postRosterProgress(roster, rec, idx, cfg, mode);
+      } else if (isDominantWin(rec[idx].blue, decidedOf(rec[idx]), cfg)) {
+        // Advance only when Blue has *dominantly* beaten this opponent.
         idx++;
-        postRosterProgress(roster, rec, idx, cfg);
+        postRosterProgress(roster, rec, idx, cfg, mode);
       }
     } catch (err) {
-      // A one-off mid-game throw shouldn't kill a healthy run, but if the CURRENT opponent never
-      // produces a game (e.g. an unrunnable team mid-roster), surface it and stop instead of spinning.
+      // A one-off mid-game throw shouldn't kill a healthy run, but if an opponent never produces a
+      // game (e.g. an unrunnable team mid-roster), stop spinning on it.
       // eslint-disable-next-line no-console
       console.error("[mcts-worker] game error:", (err as Error)?.stack || err);
-      if (decidedOf(rec[idx]) + rec[idx].ties === 0 && ++earlyFailures >= 3) {
-        running = false;
-        post({
-          type: "error",
-          message: (err as Error)?.message || `Couldn't run the matchup against ${opp.name}.`,
-        });
-        break;
+      lastError = (err as Error)?.message || `Couldn't run the matchup against ${opp.name}.`;
+      if (decidedOf(rec[idx]) + rec[idx].ties === 0 && ++failures[idx] >= 3) {
+        if (mode === "training") {
+          // Drop it and carry on with the rest of the field; only give up when nothing is left.
+          dead.add(idx);
+          sinceRotate = 0;
+          const j = nextLive(idx);
+          if (j < 0) {
+            running = false;
+            post({ type: "error", message: lastError });
+            break;
+          }
+          idx = j;
+          postRosterProgress(roster, rec, idx, cfg, mode);
+        } else {
+          running = false;
+          post({ type: "error", message: lastError });
+          break;
+        }
       }
     }
     await tick();
   }
 
-  if (running && idx >= roster.length) post({ type: "complete" }); // every opponent dominantly beaten
+  // A gauntlet that ran off the end of the roster beat every opponent; training never completes.
+  if (running && mode === "gauntlet" && idx >= roster.length) post({ type: "complete" });
   running = false;
   post({ type: "stopped" });
 }
@@ -314,7 +382,14 @@ ctx.onmessage = (e: MessageEvent<InMsg>) => {
       return;
     }
     running = true;
-    void loop(msg.p1Team, msg.roster, msg.formatid, msg.cfg ?? GAUNTLET_DEFAULTS);
+    void loop(
+      msg.p1Team,
+      msg.roster,
+      msg.formatid,
+      msg.cfg ?? GAUNTLET_DEFAULTS,
+      msg.mode ?? "gauntlet",
+      Math.max(1, Math.floor(msg.rotateEvery ?? 1))
+    );
   } else if (msg.type === "stop") {
     running = false;
   } else if (msg.type === "reset") {

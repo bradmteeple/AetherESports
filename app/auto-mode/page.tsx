@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AutoBattleController,
   ComboWin,
@@ -14,13 +14,37 @@ import { pokeSprite, pokeThumb } from "../battle/lib/sprites";
 import { REG_MB_TEAMS, teamById } from "../battle/lib/reg-mb-teams";
 import { FORMATS } from "../battle/lib/formats";
 import type { LoadedTeam } from "../battle/lib/pokepaste";
+import type { RunMode } from "../battle/lib/mcts-worker";
+import {
+  clearLibrary,
+  exportLibrary,
+  getGame,
+  libraryAvailable,
+  listGames,
+  teamKey,
+  LIBRARY_CAP,
+  type GameSummary,
+} from "../battle/lib/training-store";
+import {
+  buildPlaybook,
+  libraryTotals,
+  MIN_SUPPORT,
+  type ComboStat,
+  type OpponentPlaybook,
+} from "../battle/lib/playbook";
 
+// A battle open in the viewer — either one from this run's rolling window or one loaded back out of
+// the stored library, so both sources render through the same component.
 interface Replay {
-  n: number;
+  label: string; // "Battle #12" / "Saved game #340"
   result: GameResult;
-  redName: string; // the opponent this game was against
+  blueName: string;
+  redName: string;
   frames: ReplayFrame[];
 }
+
+// How many stored games the library panel lists under "recent games".
+const RECENT_SHOWN = 12;
 
 // One opponent in the gauntlet roster the user is building (a preset or a custom upload).
 interface Opponent {
@@ -46,6 +70,9 @@ const ZERO: Tally = {
   replayMin: null,
   replayMax: null,
   error: null,
+  mode: "training",
+  saved: 0,
+  libraryError: null,
 };
 
 const DEFAULT_BLUE = REG_MB_TEAMS[0]?.id ?? "";
@@ -72,6 +99,9 @@ export default function AutoMode() {
   const [blueId, setBlueId] = useState(DEFAULT_BLUE);
   const [blueUpload, setBlueUpload] = useState<LoadedTeam | null>(null); // uploaded team overrides preset
   const [opponents, setOpponents] = useState<Opponent[]>(DEFAULT_OPPONENTS); // the ordered roster
+  const [mode, setMode] = useState<RunMode>("training"); // train across the field, or run the gauntlet
+  const [rotateEvery, setRotateEvery] = useState(1); // training: games per opponent before rotating
+  const [persist, setPersist] = useState(true); // save finished games to the library
   const [focusId, setFocusId] = useState<string | null>(null); // opponent the combos panel reflects
   const [replayNum, setReplayNum] = useState<string>(""); // the battle number typed in
   const [replay, setReplay] = useState<Replay | null>(null); // the battle currently shown
@@ -81,6 +111,13 @@ export default function AutoMode() {
   const aliveRef = useRef(true);
   const customCounter = useRef(0); // gives each custom-uploaded opponent a stable, unique id
 
+  // Stored-game library: what's on disk for the current filter, plus the derived playbook.
+  const [libGames, setLibGames] = useState<GameSummary[]>([]);
+  const [libScope, setLibScope] = useState<"team" | "all">("team"); // this Blue team, or everything
+  const [libBusy, setLibBusy] = useState(false);
+  const [libError, setLibError] = useState<string | null>(null);
+  const syncedAt = useRef(0); // tally.saved at the last mid-run library refresh
+
   const setRun = useCallback((v: boolean) => {
     runningRef.current = v;
     setRunning(v);
@@ -89,6 +126,12 @@ export default function AutoMode() {
   // A stable string key over the roster (ids, in order) so the teardown effect only fires on a real
   // roster change — not on every render's new array identity.
   const rosterKey = opponents.map((o) => o.id).join(",");
+
+  // Blue's packed team (an upload overrides the preset), its display name, and its stable library
+  // identity. Declared before the callbacks below so they can list them as dependencies.
+  const bluePacked = blueUpload?.packed ?? teamById(blueId)?.packed ?? "";
+  const blueKey = bluePacked ? teamKey(bluePacked) : "";
+  const blueName = uploadLabel(blueUpload) ?? teamById(blueId)?.name ?? "—";
 
   // Track mount so an in-flight engine import can bail if we've unmounted.
   useEffect(() => {
@@ -103,8 +146,9 @@ export default function AutoMode() {
     if (tally.error) setRun(false);
   }, [tally.error, setRun]);
 
-  // The controller stays alive across Stop/Start so a gauntlet resumes where it left off. Changing
-  // Blue's team or editing the roster (or unmounting) tears it down; a fresh one is built on Start.
+  // The controller stays alive across Stop/Start so a run resumes where it left off. Changing Blue's
+  // team, the run mode/rotation, or the roster (or unmounting) tears it down; a fresh one is built on
+  // Start. The stored library is untouched by any of this — it's the point of saving games.
   useEffect(() => {
     setRun(false);
     setTally(ZERO);
@@ -117,7 +161,42 @@ export default function AutoMode() {
       controllerRef.current?.destroy();
       controllerRef.current = null;
     };
-  }, [blueId, blueUpload, rosterKey, setRun]);
+  }, [blueId, blueUpload, rosterKey, mode, rotateEvery, persist, setRun]);
+
+  // Read the stored library for the current filter. Called on mount, whenever the filter changes,
+  // when a run stops, and periodically mid-run so the playbook fills in as games are banked.
+  const refreshLibrary = useCallback(async () => {
+    if (!libraryAvailable()) return;
+    setLibBusy(true);
+    try {
+      const rows = await listGames(libScope === "team" && blueKey ? { blueKey } : {});
+      if (!aliveRef.current) return;
+      setLibGames(rows);
+      setLibError(null);
+    } catch (e) {
+      if (!aliveRef.current) return;
+      setLibError(e instanceof Error ? e.message : "Couldn't read the stored games.");
+    } finally {
+      if (aliveRef.current) setLibBusy(false);
+    }
+  }, [blueKey, libScope]);
+
+  useEffect(() => {
+    void refreshLibrary();
+  }, [refreshLibrary, running]); // `running` flipping false re-reads what the run just banked
+
+  // Mid-run top-up: re-read after every 10 games saved, so a long training session's playbook keeps
+  // pace without hammering storage on every single game.
+  useEffect(() => {
+    if (!running) {
+      syncedAt.current = tally.saved;
+      return;
+    }
+    if (tally.saved - syncedAt.current >= 10) {
+      syncedAt.current = tally.saved;
+      void refreshLibrary();
+    }
+  }, [tally.saved, running, refreshLibrary]);
 
   const addCustomOpponent = useCallback((team: LoadedTeam) => {
     customCounter.current += 1;
@@ -142,16 +221,18 @@ export default function AutoMode() {
         const { AutoBattleController } = await import("../battle/lib/auto-engine");
         if (!aliveRef.current) return;
         if (!controllerRef.current) {
-          // An uploaded team overrides Blue's preset dropdown.
-          const p1Team = blueUpload?.packed ?? teamById(blueId)?.packed;
           const roster = opponents.map(({ id, name, packed }) => ({ id, name, packed }));
-          if (!p1Team || roster.length === 0) {
+          if (!bluePacked || roster.length === 0) {
             setRun(false);
             return;
           }
           controllerRef.current = new AutoBattleController({
-            p1Team,
+            p1Team: bluePacked,
             roster,
+            mode,
+            rotateEvery,
+            blueName,
+            persist,
             onUpdate: (t) => setTally(t),
           });
         }
@@ -162,7 +243,7 @@ export default function AutoMode() {
     } finally {
       setLoading(false);
     }
-  }, [blueId, blueUpload, opponents, tally.complete, setRun]);
+  }, [bluePacked, blueName, opponents, mode, rotateEvery, persist, tally.complete, setRun]);
 
   const stop = useCallback(() => {
     const c = controllerRef.current;
@@ -189,39 +270,106 @@ export default function AutoMode() {
     controllerRef.current?.setFocus(id);
   }, []);
 
-  // Load battle `n` and render its play-by-play in the viewer. Shared by the manual box and the
-  // winning-combination replay chips.
-  const openReplay = useCallback((n: number) => {
-    const c = controllerRef.current;
-    if (!c || !Number.isFinite(n)) {
+  // Load battle `n` from this run's rolling window and render its play-by-play. Shared by the manual
+  // box and the winning-combination replay chips.
+  const openReplay = useCallback(
+    (n: number) => {
+      const c = controllerRef.current;
+      if (!c || !Number.isFinite(n)) {
+        setReplay(null);
+        setReplayError("Enter a battle number.");
+        return;
+      }
+      const g = c.getReplay(n);
+      if (!g) {
+        setReplay(null);
+        const t = c.getTally();
+        setReplayError(
+          t.replayMin != null && t.replayMax != null
+            ? `Battle #${n} isn't available in this run — only battles ${t.replayMin.toLocaleString()}–${t.replayMax.toLocaleString()} are kept in memory. Saved games are below.`
+            : `No battles have been played yet.`
+        );
+        return;
+      }
+      setReplayError(null);
+      setReplayNum(String(n));
+      setReplay({
+        label: `Battle #${g.n.toLocaleString()}`,
+        result: g.result,
+        blueName,
+        redName: c.opponentName(g.opponentId) ?? "Red",
+        frames: buildReplayFrames(g.lines),
+      });
+    },
+    [blueName]
+  );
+
+  // Load a game back out of the stored library — these survive a refresh, a team change, and the
+  // in-memory window's eviction, so they're what the playbook links to.
+  const openStored = useCallback(async (id: number) => {
+    try {
+      const g = await getGame(id);
+      if (!aliveRef.current) return;
+      if (!g) {
+        setReplay(null);
+        setReplayError(`Saved game #${id} is no longer stored.`);
+        return;
+      }
+      setReplayError(null);
+      setReplay({
+        label: `Saved game #${g.id.toLocaleString()} · ${new Date(g.ts).toLocaleString()}`,
+        result: g.result,
+        blueName: g.blueName,
+        redName: g.opponentName,
+        frames: buildReplayFrames(g.lines),
+      });
+    } catch (e) {
+      if (!aliveRef.current) return;
       setReplay(null);
-      setReplayError("Enter a battle number.");
-      return;
+      setReplayError(e instanceof Error ? e.message : "Couldn't open that saved game.");
     }
-    const g = c.getReplay(n);
-    if (!g) {
-      setReplay(null);
-      const t = c.getTally();
-      setReplayError(
-        t.replayMin != null && t.replayMax != null
-          ? `Battle #${n} isn't available — only battles ${t.replayMin.toLocaleString()}–${t.replayMax.toLocaleString()} are kept.`
-          : `No battles have been played yet.`
-      );
-      return;
-    }
-    setReplayError(null);
-    setReplayNum(String(n));
-    setReplay({
-      n: g.n,
-      result: g.result,
-      redName: c.opponentName(g.opponentId) ?? "Red",
-      frames: buildReplayFrames(g.lines),
-    });
   }, []);
 
   const viewBattle = useCallback(() => openReplay(parseInt(replayNum, 10)), [replayNum, openReplay]);
 
-  const blueName = uploadLabel(blueUpload) ?? teamById(blueId)?.name ?? "—";
+  // Download the filtered library as JSON, so a training session's evidence can leave the browser.
+  const exportGames = useCallback(async () => {
+    setLibBusy(true);
+    try {
+      const json = await exportLibrary(libScope === "team" && blueKey ? { blueKey } : {});
+      const url = URL.createObjectURL(new Blob([json], { type: "application/json" }));
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `aether-training-${libScope === "team" ? blueKey : "all"}-${Date.now()}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setLibError(e instanceof Error ? e.message : "Couldn't export the stored games.");
+    } finally {
+      if (aliveRef.current) setLibBusy(false);
+    }
+  }, [blueKey, libScope]);
+
+  // Deleting stored games is irreversible, so it always asks first.
+  const wipeLibrary = useCallback(async () => {
+    const scoped = libScope === "team" && blueKey;
+    const what = scoped ? `the ${libGames.length} game(s) saved for ${blueName}` : "every saved game";
+    if (!window.confirm(`Delete ${what}? This can't be undone.`)) return;
+    setLibBusy(true);
+    try {
+      await clearLibrary(scoped ? blueKey : undefined);
+      await refreshLibrary();
+    } catch (e) {
+      setLibError(e instanceof Error ? e.message : "Couldn't clear the stored games.");
+    } finally {
+      if (aliveRef.current) setLibBusy(false);
+    }
+  }, [blueKey, blueName, libGames.length, libScope, refreshLibrary]);
+
+  // The reference for optimal play, recomputed from whatever the library filter currently holds.
+  const playbook = useMemo(() => buildPlaybook(libGames), [libGames]);
+  const totals = useMemo(() => libraryTotals(libGames), [libGames]);
+
   const currentName = tally.roster[tally.currentIndex]?.name ?? "—";
   const focusName = tally.roster.find((o) => o.id === tally.focusId)?.name ?? "";
   const decided = tally.blue + tally.red;
@@ -232,13 +380,27 @@ export default function AutoMode() {
     <div className="auto-page">
       <h1 className="page-title">Auto Battle</h1>
       <p className="page-text">
-        Blue faces an ordered roster of opponents. Every decision is a Monte Carlo search that looks
-        ahead over a forked copy of the real battle simulator — mixed strategies, averaged luck, and
-        Mega timing worked out on its own; nothing is scripted. Blue keeps playing each opponent until
-        it <em>dominantly</em> wins — 95%-confident (Wilson score) that its true win rate over decided
-        games is above 60%, over at least 15 decided games — then advances to the next team. It runs
-        deliberately slowly for accuracy, and a stuck matchup (like a mirror) plays on until you press
-        Stop. Click any winning combination below to watch that battle.
+        Blue faces a roster of opponents. Every decision is a Monte Carlo search that looks ahead over
+        a forked copy of the real battle simulator — mixed strategies, averaged luck, and Mega timing
+        worked out on its own; nothing is scripted.{" "}
+        {mode === "training" ? (
+          <>
+            In <strong>Training</strong>, Blue rotates through the whole roster — {rotateEvery} game
+            {rotateEvery === 1 ? "" : "s"} against each team, round-robin, for as long as you leave it
+            running — so evidence builds against every opponent instead of piling up on the first team
+            that blocks a gauntlet. Every game is saved below and mined into a playbook: which four to
+            bring, which two to lead, and the games that back it up.
+          </>
+        ) : (
+          <>
+            In <strong>Gauntlet</strong>, Blue keeps playing one opponent until it <em>dominantly</em>{" "}
+            wins — 95%-confident (Wilson score) that its true win rate over decided games is above 60%,
+            over at least 15 decided games — then advances to the next team. A stuck matchup (like a
+            mirror) plays on until you press Stop.
+          </>
+        )}{" "}
+        It runs deliberately slowly for accuracy. Click any winning combination below to watch that
+        battle.
       </p>
 
       <div className="auto-teampick">
@@ -270,10 +432,60 @@ export default function AutoMode() {
         />
       </div>
 
+      <div className="auto-modebar">
+        <div className="auto-mode-group" role="group" aria-label="Run mode">
+          <button
+            className={"auto-mode-btn" + (mode === "training" ? " auto-mode-btn--on" : "")}
+            onClick={() => setMode("training")}
+            disabled={running}
+          >
+            🎯 Training
+            <span className="auto-mode-sub">rotate through every team</span>
+          </button>
+          <button
+            className={"auto-mode-btn" + (mode === "gauntlet" ? " auto-mode-btn--on" : "")}
+            onClick={() => setMode("gauntlet")}
+            disabled={running}
+          >
+            🏆 Gauntlet
+            <span className="auto-mode-sub">beat each in order</span>
+          </button>
+        </div>
+
+        {mode === "training" && (
+          <label className="auto-mode-field">
+            <span className="auto-team-label">Games per team before rotating</span>
+            <select
+              className="auto-team-select"
+              value={rotateEvery}
+              disabled={running}
+              onChange={(e) => setRotateEvery(Number(e.target.value))}
+            >
+              {[1, 2, 3, 5, 10].map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+
+        <label className="auto-mode-check" title="Finished games are stored in this browser">
+          <input
+            type="checkbox"
+            checked={persist}
+            disabled={running || !libraryAvailable()}
+            onChange={(e) => setPersist(e.target.checked)}
+          />
+          <span>Save games to the library</span>
+        </label>
+      </div>
+
       <RosterBuilder
         opponents={opponents}
         setOpponents={setOpponents}
         disabled={running}
+        mode={mode}
         onAddCustom={addCustomOpponent}
       />
 
@@ -348,16 +560,24 @@ export default function AutoMode() {
           available to watch back.
         </p>
       )}
+      {tally.libraryError && (
+        <p className="auto-replay-error auto-plan-hint--center">
+          Games aren&apos;t being saved: {tally.libraryError}
+        </p>
+      )}
       {replayError && <p className="auto-replay-error">{replayError}</p>}
-      {replay && <ReplayViewer replay={replay} blueName={blueName} redName={replay.redName} />}
+      {replay && <ReplayViewer replay={replay} />}
 
       {running && (
         <div className="auto-thinking">
           <span className="auto-thinking-dot" />
           <span className="auto-thinking-text">
             {blueName} vs {currentName} — searching {tally.sims.toLocaleString()} sims per decision
-            {tally.turn ? ` · game turn ${tally.turn}` : ""}. Games finish slowly; Blue advances only
-            once it dominantly wins.
+            {tally.turn ? ` · game turn ${tally.turn}` : ""}. Games finish slowly;{" "}
+            {mode === "training"
+              ? `Blue rotates to the next team every ${rotateEvery} game${rotateEvery === 1 ? "" : "s"}.`
+              : "Blue advances only once it dominantly wins."}
+            {persist ? ` ${tally.saved.toLocaleString()} saved this run.` : ""}
           </span>
         </div>
       )}
@@ -366,6 +586,7 @@ export default function AutoMode() {
         roster={tally.roster}
         complete={tally.complete}
         focusId={tally.focusId}
+        mode={mode}
         onFocus={focusOpponent}
       />
 
@@ -396,26 +617,44 @@ export default function AutoMode() {
 
       <p className="auto-note">
         A &quot;combination&quot; is a specific bring-4 split into a lead pair and a back pair; the two
-        shown are the ones Blue won the most games with against the selected opponent — click an
-        opponent above to inspect its combinations. Editing the roster or pressing Reset clears the
-        tally. Only the most recent 500 battles are stored, so some older wins may not be watchable.
+        shown are the ones Blue won the most games with against the selected opponent in{" "}
+        <em>this run</em> — click an opponent above to inspect its combinations. Editing the roster or
+        pressing Reset clears the tally (never the saved library). Only the most recent 500 battles of
+        a run stay in memory; saved games below outlive it.
       </p>
+
+      <TrainingLibrary
+        games={libGames}
+        playbook={playbook}
+        totals={totals}
+        scope={libScope}
+        onScope={setLibScope}
+        blueName={blueName}
+        busy={libBusy}
+        error={libError}
+        onRefresh={refreshLibrary}
+        onExport={exportGames}
+        onClear={wipeLibrary}
+        onOpen={openStored}
+      />
     </div>
   );
 }
 
-// The opponent roster the gauntlet runs through, in order. Presets are toggled on/off; custom teams
-// are uploaded (and validated as Reg M-B legal by TeamUpload) and added as extra opponents. Order is
-// the gauntlet sequence, adjustable with the up/down controls.
+// The opponent roster the run works through, in order. Presets are toggled on/off; custom teams are
+// uploaded (and validated as Reg M-B legal by TeamUpload) and added as extra opponents. Order is the
+// gauntlet sequence — or the training rotation — adjustable with the up/down controls.
 function RosterBuilder({
   opponents,
   setOpponents,
   disabled,
+  mode,
   onAddCustom,
 }: {
   opponents: Opponent[];
   setOpponents: React.Dispatch<React.SetStateAction<Opponent[]>>;
   disabled: boolean;
+  mode: RunMode;
   onAddCustom: (team: LoadedTeam) => void;
 }) {
   const inRoster = (id: string) => opponents.some((o) => o.id === id);
@@ -439,7 +678,11 @@ function RosterBuilder({
 
   return (
     <div className="auto-roster-build">
-      <div className="auto-roster-title">Opponent roster · Blue must dominantly beat each in order</div>
+      <div className="auto-roster-title">
+        {mode === "training"
+          ? "Opponent roster · Blue trains against each in rotation"
+          : "Opponent roster · Blue must dominantly beat each in order"}
+      </div>
 
       {opponents.length === 0 ? (
         <p className="auto-note auto-plan-hint--center">
@@ -516,17 +759,20 @@ function RosterBuilder({
   );
 }
 
-// The gauntlet standings: each opponent's record, its Wilson win-rate floor against the 60% bar, and
-// its status. Click a row to point the winning-combinations panel at that opponent.
+// The standings: each opponent's record, its Wilson win-rate floor against the 60% bar, and its
+// status. Click a row to point the winning-combinations panel at that opponent. In training, "beaten"
+// is a read-out (Blue clears the bar right now) rather than a step the run has passed.
 function RosterProgress({
   roster,
   complete,
   focusId,
+  mode,
   onFocus,
 }: {
   roster: OpponentProgress[];
   complete: boolean;
   focusId: string | null;
+  mode: RunMode;
   onFocus: (id: string) => void;
 }) {
   if (!roster.length) return null;
@@ -534,7 +780,9 @@ function RosterProgress({
   return (
     <div className="auto-progress">
       <div className="auto-progress-title">
-        Gauntlet · beaten {beaten} of {roster.length}
+        {mode === "training"
+          ? `Training rotation · dominant vs ${beaten} of ${roster.length}`
+          : `Gauntlet · beaten ${beaten} of ${roster.length}`}
       </div>
       {complete && (
         <div className="auto-complete">
@@ -559,7 +807,15 @@ function RosterProgress({
               {o.blue + o.red ? `${pct}% floor` : "—"}
             </span>
             <span className={"auto-opp-badge auto-opp-badge--" + o.status}>
-              {o.status === "beaten" ? "beaten ✓" : o.status === "current" ? "current" : "pending"}
+              {o.status === "beaten"
+                ? mode === "training"
+                  ? "dominant ✓"
+                  : "beaten ✓"
+                : o.status === "current"
+                  ? "current"
+                  : mode === "training"
+                    ? "in rotation"
+                    : "pending"}
             </span>
           </button>
         );
@@ -807,17 +1063,12 @@ function TeamUpload({
   );
 }
 
-// A visual, turn-by-turn replay of one stored battle — the Battle-tab board look, with the only
-// controls being turn navigation (Prev / slider / Next). Blue is p1 (near side), Red is p2 (foe).
-function ReplayViewer({
-  replay,
-  blueName,
-  redName,
-}: {
-  replay: Replay;
-  blueName: string;
-  redName: string;
-}) {
+// A visual, turn-by-turn replay of one battle — this run's or one loaded back out of the library —
+// with the Battle-tab board look and only turn navigation (Prev / slider / Next). Blue is p1 (near
+// side), Red is p2 (foe). Team names travel with the replay so a saved game shows the teams it was
+// actually played with, not whatever is selected now.
+function ReplayViewer({ replay }: { replay: Replay }) {
+  const { blueName, redName } = replay;
   const [idx, setIdx] = useState(0);
 
   // Snap back to the lead whenever a different battle is loaded.
@@ -842,7 +1093,7 @@ function ReplayViewer({
   return (
     <div className="auto-viewer">
       <div className="auto-viewer-head">
-        <span className="auto-viewer-title">Battle #{replay.n.toLocaleString()}</span>
+        <span className="auto-viewer-title">{replay.label}</span>
         <span className="auto-viewer-result">{winner}</span>
       </div>
 
@@ -1017,3 +1268,344 @@ function ReplayRoster({
   );
 }
 
+
+// ── Stored games ────────────────────────────────────────────────────────────────────────────────
+// The persistent side of the page: every game a run saved, and what those games say about how to
+// play the matchup. Unlike the live tally above, this survives a refresh, a team swap, and the
+// in-memory replay window's eviction — it's the reference the training runs are for.
+
+const pct = (x: number) => `${Math.round(x * 100)}%`;
+
+function TrainingLibrary({
+  games,
+  playbook,
+  totals,
+  scope,
+  onScope,
+  blueName,
+  busy,
+  error,
+  onRefresh,
+  onExport,
+  onClear,
+  onOpen,
+}: {
+  games: GameSummary[];
+  playbook: OpponentPlaybook[];
+  totals: ReturnType<typeof libraryTotals>;
+  scope: "team" | "all";
+  onScope: (s: "team" | "all") => void;
+  blueName: string;
+  busy: boolean;
+  error: string | null;
+  onRefresh: () => void;
+  onExport: () => void;
+  onClear: () => void;
+  onOpen: (id: number) => void;
+}) {
+  const [expanded, setExpanded] = useState<string | null>(null); // opponent id showing all its lines
+
+  if (!libraryAvailable()) {
+    return (
+      <p className="auto-note auto-plan-hint--center">
+        This browser can&apos;t store games (private mode or storage disabled), so runs can&apos;t be
+        kept as reference material.
+      </p>
+    );
+  }
+
+  return (
+    <div className="auto-library">
+      <div className="auto-library-head">
+        <div className="auto-library-title">Saved games · reference for optimal play</div>
+        <div className="auto-library-actions">
+          <div className="auto-mode-group auto-mode-group--mini" role="group" aria-label="Library scope">
+            <button
+              className={"auto-mode-btn" + (scope === "team" ? " auto-mode-btn--on" : "")}
+              onClick={() => onScope("team")}
+            >
+              This team
+            </button>
+            <button
+              className={"auto-mode-btn" + (scope === "all" ? " auto-mode-btn--on" : "")}
+              onClick={() => onScope("all")}
+            >
+              All teams
+            </button>
+          </div>
+          <button className="battle-btn battle-btn--ghost" onClick={onRefresh} disabled={busy}>
+            {busy ? "…" : "↻ Refresh"}
+          </button>
+          <button
+            className="battle-btn battle-btn--ghost"
+            onClick={onExport}
+            disabled={busy || games.length === 0}
+          >
+            ⤓ Export JSON
+          </button>
+          <button
+            className="battle-btn battle-btn--ghost auto-library-danger"
+            onClick={onClear}
+            disabled={busy || games.length === 0}
+          >
+            Clear
+          </button>
+        </div>
+      </div>
+
+      <p className="auto-note auto-library-scope">
+        {scope === "team" ? `Games Blue played with ${blueName}.` : "Games across every Blue team."} The
+        library keeps the most recent {LIBRARY_CAP.toLocaleString()} games in this browser.
+      </p>
+
+      {error && <p className="auto-replay-error">{error}</p>}
+
+      {games.length === 0 ? (
+        <p className="auto-note auto-plan-hint--center">
+          Nothing saved yet. Run Training with <em>Save games to the library</em> on, and every
+          finished game lands here — with a playbook of what actually wins.
+        </p>
+      ) : (
+        <>
+          <div className="auto-scoreboard auto-scoreboard--library">
+            <div className="auto-stat">
+              <span className="auto-stat-label">Saved games</span>
+              <span className="auto-stat-value">{totals.games.toLocaleString()}</span>
+              <span className="auto-stat-sub">
+                vs {totals.opponents} team{totals.opponents === 1 ? "" : "s"}
+              </span>
+            </div>
+            <div className="auto-stat auto-stat--blue">
+              <span className="auto-stat-label">Record</span>
+              <span className="auto-stat-value">
+                {totals.blue}–{totals.red}
+              </span>
+              <span className="auto-stat-sub">{totals.ties} tie{totals.ties === 1 ? "" : "s"}</span>
+            </div>
+            <div className="auto-stat">
+              <span className="auto-stat-label">Win rate</span>
+              <span className="auto-stat-value">{pct(totals.winRate)}</span>
+              <span className="auto-stat-sub">of {totals.decided} decided</span>
+            </div>
+            <div className="auto-stat">
+              <span className="auto-stat-label">Confidence floor</span>
+              <span className="auto-stat-value">{pct(totals.lower)}</span>
+              <span className="auto-stat-sub">Wilson 95%</span>
+            </div>
+          </div>
+
+          {playbook.map((p) => (
+            <PlaybookCard
+              key={p.opponentId}
+              entry={p}
+              expanded={expanded === p.opponentId}
+              onToggle={() => setExpanded(expanded === p.opponentId ? null : p.opponentId)}
+              onOpen={onOpen}
+            />
+          ))}
+
+          <RecentGames games={games} onOpen={onOpen} />
+
+          <p className="auto-note">
+            Lines are ranked by their Wilson 95% <em>lower bound</em>, not raw win rate, so a 2–0 fluke
+            never outranks a 34–11 line: the ranking already accounts for how much evidence there is. A
+            line needs {MIN_SUPPORT} games before it can be headlined as the recommendation. Click any
+            game number to watch it back.
+          </p>
+        </>
+      )}
+    </div>
+  );
+}
+
+// One opponent's page of the playbook: the line the games support, the line to avoid, and — on
+// demand — every line tried, plus what that opponent tends to lead with.
+function PlaybookCard({
+  entry,
+  expanded,
+  onToggle,
+  onOpen,
+}: {
+  entry: OpponentPlaybook;
+  expanded: boolean;
+  onToggle: () => void;
+  onOpen: (id: number) => void;
+}) {
+  const shown = expanded ? entry.leads : entry.leads.slice(0, 3);
+  return (
+    <div className="auto-play">
+      <div className="auto-play-head">
+        <span className="auto-play-name">vs {entry.opponentName}</span>
+        <span className="auto-play-record">
+          {entry.blue}–{entry.red}
+          {entry.ties ? ` · ${entry.ties} tie${entry.ties === 1 ? "" : "s"}` : ""} over{" "}
+          {entry.games.toLocaleString()} game{entry.games === 1 ? "" : "s"}
+        </span>
+        <span className="auto-play-floor" title="Wilson 95% lower bound of Blue's decided win rate">
+          {pct(entry.winRate)} · {pct(entry.lower)} floor
+        </span>
+      </div>
+
+      {entry.best ? (
+        <div className="auto-play-best">
+          <span className="auto-play-tag auto-play-tag--best">Bring this</span>
+          <LineSummary stat={entry.best} onOpen={onOpen} />
+        </div>
+      ) : (
+        <p className="auto-note auto-play-thin">
+          No line has {MIN_SUPPORT} games yet — keep training this matchup for a recommendation.
+        </p>
+      )}
+
+      {entry.worst && entry.best && entry.worst.key !== entry.best.key && (
+        <div className="auto-play-best auto-play-best--avoid">
+          <span className="auto-play-tag auto-play-tag--avoid">Avoid</span>
+          <LineSummary stat={entry.worst} onOpen={onOpen} />
+        </div>
+      )}
+
+      {entry.leads.length > 0 && (
+        <table className="auto-play-table">
+          <thead>
+            <tr>
+              <th>Lead</th>
+              <th>Back</th>
+              <th>Record</th>
+              <th>Win</th>
+              <th>Floor</th>
+              <th>Watch</th>
+            </tr>
+          </thead>
+          <tbody>
+            {shown.map((l) => (
+              <tr key={l.key}>
+                <td>{l.lead}</td>
+                <td>{l.back}</td>
+                <td>
+                  {l.wins}–{l.losses}
+                  {l.ties ? `–${l.ties}` : ""}
+                </td>
+                <td>{l.decided ? pct(l.winRate) : "—"}</td>
+                <td>{pct(l.lower)}</td>
+                <td>
+                  <ReplayChips ids={l.winIds} max={3} onOpen={onOpen} />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      <div className="auto-play-foot">
+        {entry.leads.length > 3 && (
+          <button className="battle-btn battle-btn--ghost auto-roster-mini" onClick={onToggle}>
+            {expanded ? "Show fewer lines" : `Show all ${entry.leads.length} lines`}
+          </button>
+        )}
+        {entry.redLeads.length > 0 && (
+          <span className="auto-play-foes">
+            They lead:{" "}
+            {entry.redLeads.slice(0, 3).map((r, i) => (
+              <span key={r.lead} className="auto-play-foe">
+                {i > 0 && ", "}
+                {r.lead} ({r.games}×, Blue {pct(r.games ? r.blueWins / r.games : 0)})
+              </span>
+            ))}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// The headline for one line of play: what to bring, what to lead, how it has gone, and the games.
+function LineSummary({ stat, onOpen }: { stat: ComboStat; onOpen: (id: number) => void }) {
+  return (
+    <div className="auto-play-line">
+      <span className="auto-combo-config">
+        <span className="auto-combo-part">
+          <span className="auto-combo-part-label">Lead</span>
+          <ComboMons names={stat.lead} />
+        </span>
+        <span className="auto-combo-part">
+          <span className="auto-combo-part-label">Back</span>
+          <ComboMons names={stat.back} />
+        </span>
+      </span>
+      <span className="auto-play-line-stats">
+        {stat.wins}–{stat.losses}
+        {stat.ties ? `–${stat.ties}` : ""} · {stat.decided ? pct(stat.winRate) : "—"} win ·{" "}
+        {pct(stat.lower)} floor
+      </span>
+      <span className="auto-combo-replays">
+        {stat.winIds.length > 0 && (
+          <>
+            <span className="auto-combo-replays-label">Wins:</span>
+            <ReplayChips ids={stat.winIds} max={6} onOpen={onOpen} />
+          </>
+        )}
+        {stat.lossIds.length > 0 && (
+          <>
+            <span className="auto-combo-replays-label">Losses:</span>
+            <ReplayChips ids={stat.lossIds} max={3} onOpen={onOpen} />
+          </>
+        )}
+      </span>
+    </div>
+  );
+}
+
+function ReplayChips({ ids, max, onOpen }: { ids: number[]; max: number; onOpen: (id: number) => void }) {
+  if (!ids.length) return <span className="auto-combo-more">—</span>;
+  return (
+    <>
+      {ids.slice(0, max).map((id) => (
+        <button key={id} className="auto-combo-chip" onClick={() => onOpen(id)}>
+          #{id.toLocaleString()}
+        </button>
+      ))}
+      {ids.length > max && <span className="auto-combo-more">+{ids.length - max}</span>}
+    </>
+  );
+}
+
+// The newest saved games, so a run that just finished can be watched back straight away.
+function RecentGames({ games, onOpen }: { games: GameSummary[]; onOpen: (id: number) => void }) {
+  const rows = games.slice(0, RECENT_SHOWN);
+  if (!rows.length) return null;
+  return (
+    <div className="auto-recent">
+      <div className="auto-combos-title">Most recent saved games</div>
+      <table className="auto-play-table">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Played</th>
+            <th>Opponent</th>
+            <th>Blue led</th>
+            <th>Turns</th>
+            <th>Result</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((g) => (
+            <tr key={g.id}>
+              <td>
+                <button className="auto-combo-chip" onClick={() => onOpen(g.id)}>
+                  #{g.id.toLocaleString()}
+                </button>
+              </td>
+              <td>{new Date(g.ts).toLocaleString()}</td>
+              <td>{g.opponentName}</td>
+              <td>{g.blueLead ?? "—"}</td>
+              <td>{g.turns || "—"}</td>
+              <td className={"auto-recent-result auto-recent-result--" + g.result}>
+                {g.result === "blue" ? "Blue win" : g.result === "red" ? "Loss" : "Tie"}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
