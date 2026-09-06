@@ -1,4 +1,4 @@
-// Auto Battle controller — roster gauntlet.
+// Auto Battle controller — roster gauntlet and training rotation.
 //
 // Blue plays VGC 2026 Reg M-B against an ordered roster of opponents. Each decision is a Monte Carlo
 // search over a forked copy of the real Showdown simulator (see mcts.ts): it treats the simultaneous
@@ -12,9 +12,15 @@
 // played against) into per-opponent records, tracks each opponent's top winning "combinations" (a
 // specific lead pair + back pair) and their winning replays, and keeps one rolling window of game logs
 // so any battle can be watched back. Those aggregates live here so getTally()/getReplay() are sync.
+//
+// It also writes every finished game to the persistent library (training-store.ts) when asked, so a
+// training run's evidence outlives the page and can be mined later for optimal play (playbook.ts).
+// That write is best-effort and kept off the critical path: games are queued and never awaited by the
+// message handler, and a storage failure only sets `libraryError` on the tally.
 
 import { FORMATS } from "./formats";
-import type { RosterTeam, WorkerGame, WorkerMsg } from "./mcts-worker";
+import type { RosterTeam, RunMode, WorkerGame, WorkerMsg } from "./mcts-worker";
+import { libraryAvailable, saveGames, teamKey, type NewGame } from "./training-store";
 import { wilsonLowerBound, type GauntletConfig } from "./wilson";
 
 // A winning "combination" for Blue: a specific lead pair + back pair (the exact 4 brought, split into
@@ -56,6 +62,9 @@ export interface Tally {
   replayMin: number | null; // smallest game number still available to replay (null if none)
   replayMax: number | null; // latest game number available to replay
   error: string | null; // set if the worker couldn't run a matchup (e.g. an unrunnable team)
+  mode: RunMode; // how this run works through the roster
+  saved: number; // games written to the persistent library by this controller
+  libraryError: string | null; // set if saving to the library failed (the run itself carries on)
 }
 
 export type GameResult = "blue" | "red" | "tie";
@@ -98,8 +107,12 @@ interface OppAgg {
 interface ControllerOpts {
   onUpdate: (tally: Tally) => void;
   p1Team: string; // packed team Blue plays (from the Reg M-B registry or an upload)
-  roster: RosterTeam[]; // ordered opponents Blue faces, in gauntlet order
+  roster: RosterTeam[]; // ordered opponents Blue faces, in roster order
   cfg?: GauntletConfig; // optional confidence-gate override (defaults in the worker)
+  mode?: RunMode; // "gauntlet" (default) or "training" round-robin
+  rotateEvery?: number; // training only: games per opponent before rotating
+  blueName?: string; // label stored with each saved game (e.g. the team's display name)
+  persist?: boolean; // write finished games to the persistent library (default: true)
 }
 
 export class AutoBattleController {
@@ -107,9 +120,20 @@ export class AutoBattleController {
   private readonly p1Team: string;
   private readonly roster: RosterTeam[];
   private readonly cfg?: GauntletConfig;
+  private readonly mode: RunMode;
+  private readonly rotateEvery: number;
   private readonly formatid = FORMATS.vgcregmb.engineFormat;
   private destroyed = false;
   private running = false;
+
+  // Persistent library: Blue's stable team key, the per-opponent keys, and the write queue.
+  private readonly persist: boolean;
+  private readonly blueKey: string;
+  private readonly blueName: string;
+  private readonly oppKey = new Map<string, string>(); // roster id -> stable team key
+  private saveChain: Promise<void> = Promise.resolve(); // serializes library writes
+  private saved = 0;
+  private libraryError: string | null = null;
 
   // Per-opponent aggregates, in gauntlet order (also indexable by id via oppById).
   private readonly opps: OppAgg[];
@@ -132,6 +156,11 @@ export class AutoBattleController {
     this.p1Team = opts.p1Team;
     this.roster = opts.roster;
     this.cfg = opts.cfg;
+    this.mode = opts.mode ?? "gauntlet";
+    this.rotateEvery = Math.max(1, Math.floor(opts.rotateEvery ?? 1));
+    this.persist = (opts.persist ?? true) && libraryAvailable();
+    this.blueKey = teamKey(opts.p1Team);
+    this.blueName = opts.blueName ?? "Blue";
     this.opps = opts.roster.map((o) => ({
       id: o.id,
       name: o.name,
@@ -140,6 +169,9 @@ export class AutoBattleController {
       beaten: false,
     }));
     for (const o of this.opps) this.oppById.set(o.id, o);
+    // Stored games are keyed by the opponent's TEAM, not the roster row's per-run id, so a library
+    // built today lines up with the same team in tomorrow's roster.
+    for (const o of opts.roster) this.oppKey.set(o.id, teamKey(o.packed));
     // The worker owns the heavy search loop; it's created lazily on first start().
   }
 
@@ -157,7 +189,15 @@ export class AutoBattleController {
     this.running = true;
     this.lastError = null;
     const w = this.ensureWorker();
-    w.postMessage({ type: "start", p1Team: this.p1Team, roster: this.roster, formatid: this.formatid, cfg: this.cfg });
+    w.postMessage({
+      type: "start",
+      p1Team: this.p1Team,
+      roster: this.roster,
+      formatid: this.formatid,
+      cfg: this.cfg,
+      mode: this.mode,
+      rotateEvery: this.rotateEvery,
+    });
     this.emit(true);
   }
 
@@ -180,8 +220,11 @@ export class AutoBattleController {
     this.turn = 0;
     this.sims = 0;
     this.lastError = null;
+    this.libraryError = null;
     this.focus = null;
     this.replays.length = 0;
+    // Note: the persistent library is NOT cleared here — Reset starts a fresh tally, it doesn't throw
+    // away games already banked as reference material. The library panel has its own Clear.
     this.worker?.postMessage({ type: "reset" });
     this.emit(true);
   }
@@ -277,6 +320,41 @@ export class AutoBattleController {
       lines: o.lines,
     });
     if (this.replays.length > REPLAY_CAP) this.replays.shift();
+
+    if (this.persist) this.archive(o, agg?.name ?? o.opponentId);
+  }
+
+  // Queue one finished game for the persistent library. Writes are chained so two games never open
+  // overlapping transactions, and a failure is reported once without stopping the run.
+  private archive(o: WorkerGame, opponentName: string) {
+    const row: NewGame = {
+      ts: Date.now(),
+      mode: this.mode,
+      blueKey: this.blueKey,
+      blueName: this.blueName,
+      opponentId: this.oppKey.get(o.opponentId) ?? o.opponentId,
+      opponentName,
+      result: o.result,
+      turns: o.turns,
+      blueCombo: o.blueCombo,
+      blueLead: o.blueLead,
+      redCombo: o.redCombo,
+      redLead: o.redLead,
+      lines: o.lines,
+    };
+    this.saveChain = this.saveChain
+      .then(async () => {
+        // Deliberately not guarded on `destroyed`: a game that was actually played is evidence, so a
+        // queued write still lands even if the page tore the controller down meanwhile.
+        await saveGames([row]);
+        this.saved++;
+        this.libraryError = null;
+        this.emit(false);
+      })
+      .catch((e: unknown) => {
+        this.libraryError = e instanceof Error ? e.message : "Couldn't save this game to the library.";
+        this.emit(false);
+      });
   }
 
   private totalGames(): number {
@@ -323,6 +401,14 @@ export class AutoBattleController {
       });
   }
 
+  // In a gauntlet "beaten" means the run has passed this opponent, so it outranks everything. In
+  // training Blue keeps rotating back to teams it already clears, so being the one on the board wins.
+  private statusOf(beaten: boolean, i: number): OpponentProgress["status"] {
+    const current = i === this.currentIndex;
+    if (this.mode === "training") return current ? "current" : beaten ? "beaten" : "pending";
+    return beaten ? "beaten" : current ? "current" : "pending";
+  }
+
   private snapshot(): Tally {
     let blue = 0,
       red = 0,
@@ -343,7 +429,7 @@ export class AutoBattleController {
         games: o.counts.games,
         lowerBound: wilsonLowerBound(o.counts.blue, decided, this.cfg?.z),
         beaten: o.beaten,
-        status: o.beaten ? "beaten" : i === this.currentIndex ? "current" : "pending",
+        status: this.statusOf(o.beaten, i),
       };
     });
     const focusId = this.focusId();
@@ -363,6 +449,9 @@ export class AutoBattleController {
       replayMin: this.replays[0]?.n ?? null,
       replayMax: this.replays[this.replays.length - 1]?.n ?? null,
       error: this.lastError,
+      mode: this.mode,
+      saved: this.saved,
+      libraryError: this.libraryError,
     };
   }
 
